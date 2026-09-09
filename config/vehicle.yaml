@@ -5,7 +5,7 @@ connection:
   endpoint: "udpin:0.0.0.0:14550"   # BlueOS 需配一个指向本机 14550 的 UDP Client endpoint
   dialect: "ardupilotmega"
   heartbeat_timeout_s: 10.0
-  depth_message: "SCALED_PRESSURE2" # 备选: VFR_HUD (alt)
+  depth_message: "GLOBAL_POSITION_INT"  # 主: ArduSub 融合深度(relative_alt); 备选: SCALED_PRESSURE2
 
 control:
   CTRL_HZ: 10                       # 主控制循环频率 (Hz)
