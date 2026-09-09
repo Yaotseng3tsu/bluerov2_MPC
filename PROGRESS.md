@@ -44,4 +44,26 @@
 - 关键坑:pymavlink `udpout` 套接字不 bind,Windows 上 recvfrom 抛 WSAEINVAL → SITL 改用自绑定 raw socket + mav2 编解码。
 - 实测结果(SITL 闭环 ✅):plant 终速与解析解一致(u=0.3→0.70 m/s);pseudo_stick 下潜 u=+0.3 深度上升、上浮 u=-0.3 回落、停后浮力漂移;限幅与退出回中位生效。**"让机器人动起来"最低目标在仿真中达成。**
 - 你的决定 / 下一步:继续在 SITL 里做 P4 PID 定深 / P5 MPC 定深(离线);P3 系统辨识等真机数据。
-- git commit: (SITL 提交)
+- git commit: decb18f (已推送)
+
+### [Phase 1] 安全逻辑严格验证 — 2026-09-10
+- 目标:逐项验证 P1 安全逻辑(此前只跑了顺利路径,未严格验证)。
+- 交付:`tests/test_safety.py`(7 项单元测试,mock 连接记录实际通道值)。
+- 单元测试(7/7 ✅):
+  1. 水平轴 U_MAX 限幅(u=0.9→300)
+  2. z 限幅+映射(中位500, u=0.9→650, u=-0.9→350)
+  3. 非标准 z 中位不越界(z_neutral=300 时 span 取小边,不越 [0,1000])
+  4. 符号翻转 sign_z=-1 生效
+  5. send() 端到端限幅(x=0.9,y=-0.9,r=0.9 → 300,-300,300)
+  6. 退出回中位(close 发 5 帧中位,末帧=中位,连接关闭)
+  7. 中断路径(main 内 KeyboardInterrupt → finally→close,rc=130,末帧=中位)
+- SITL 集成测试(✅):
+  - A 限幅端到端:请求 u=0.9,SITL 实收 u=+0.30。
+  - B 退出回中位:cmd-timeout=20s 下,指令停后 u 立刻→0(来自中位帧,非超时)。
+  - C 载具侧失效:硬杀 python(不发中位),约 1.5s(=cmd-timeout)后 SITL 自动 u→0。
+- 无 arm 确认:pseudo_stick 只读显示 arm 状态,无任何解锁/改模式代码。
+- 诚实说明 / 待真机确认:
+  - "看门狗"在 P1 = (a) 退出/中断回中位 + (b) 载具侧 MANUAL_CONTROL 失联失效;**不是**控制器里的独立计时器。控制器侧带遥测超时的看门狗属于 P2+(需深度反馈)。
+  - SITL 的 cmd-timeout=1.5s 是对 ArduSub 失联行为的**模拟**;真机上 ArduSub 的实际失联超时/是否 disarm 需 P1 现场确认。
+  - z 中位=500、+z 下潜为 SITL 约定;真机符号/中位仍需 P1 实测。
+- git commit: (P1 安全验证提交)
