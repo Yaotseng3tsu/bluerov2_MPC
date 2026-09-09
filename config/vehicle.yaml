@@ -1,0 +1,49 @@
+# BlueROV2 R4 — 核心配置 (代码只读此文件,不硬编码参数)
+# 带 TODO 的值需在对应 Phase 实测后回填。
+
+connection:
+  endpoint: "udpin:0.0.0.0:14550"   # BlueOS 需配一个指向本机 14550 的 UDP Client endpoint
+  dialect: "ardupilotmega"
+  heartbeat_timeout_s: 10.0
+  depth_message: "SCALED_PRESSURE2" # 备选: VFR_HUD (alt)
+
+control:
+  CTRL_HZ: 10                       # 主控制循环频率 (Hz)
+
+safety:
+  U_MAX: 0.3                        # 归一化指令上限 |u| (第一阶段保守值)
+  WATCHDOG_MS: 300                  # 超时未发新指令则回中位
+  DEPTH_MIN: 0.2                    # m, 向下为正
+  DEPTH_MAX: 3.0                    # m, 设为 池深-0.5 左右
+  allow_arm: false                  # 是否允许脚本自动解锁 (默认否,需显式确认)
+
+manual_control:                     # <-- Phase 1 实测后回填
+  z_neutral: 500                    # TODO: z 中位整型值 (电机停转)
+  sign_x: 1                         # TODO: +x 是否对应前进
+  sign_y: 1                         # TODO
+  sign_z: 1                         # TODO: +z 是否对应下潜(与深度正方向一致)
+  sign_r: 1                         # TODO
+
+depth_model:                        # <-- Phase 3 辨识后回填 (二阶模型)
+  m_eff: null                       # TODO: 有效质量(含附加质量)
+  d_lin: null                       # TODO: 线性阻尼
+  d_quad: null                      # TODO: 二次阻尼
+  K_u: null                         # TODO: 归一化指令->推力增益
+  tau: null                         # (可选) 一阶模型时间常数
+
+pid:                                # <-- Phase 4 调参
+  Kp: 3.0
+  Ki: 0.5
+  Kd: 1.0
+  i_limit: 0.3
+  u_limit: 0.3
+
+mpc:                                # <-- Phase 5 调参
+  dt: 0.1                           # 预测步长 (s)
+  N: 20                             # 预测时域步数
+  Q_pos: 10.0                       # 深度跟踪权重
+  Q_vel: 1.0                        # 深度速率权重
+  R: 0.1                            # 控制量权重
+  R_du: 0.5                         # 控制增量权重 (平滑)
+  u_limit: 0.3                      # 输入约束 |u|
+  solver: "ipopt"

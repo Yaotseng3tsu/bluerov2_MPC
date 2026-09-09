@@ -1,0 +1,16 @@
+# --- P0-P4 必需 ---
+pymavlink>=2.4.40,<3
+numpy>=1.24
+pyyaml>=6.0
+
+# --- P3 分析/绘图 ---
+matplotlib>=3.7
+scipy>=1.10
+
+# --- P5 MPC (参考论文使用 CasADi/IPOPT) ---
+casadi>=3.6
+# do-mpc>=4.6   # 可选:更高层的 MPC 封装,需要时再取消注释
+
+# --- P6 RL (可选,后期再装) ---
+# gymnasium>=0.29
+# stable-baselines3>=2.2
