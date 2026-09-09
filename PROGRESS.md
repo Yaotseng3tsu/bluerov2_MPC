@@ -96,4 +96,12 @@
 - 离线验证(SITL,✅):未解锁指令无效;--arm 后 set MANUAL+解锁→指令驱动→退出自动上锁;标定写回 config;安全单元测试扩到 9/9(含解锁后自动上锁、未解锁不误上锁)。
 - Windows 提醒:kill -INT 无法可靠投递 SIGINT,故 Ctrl+C→上锁改用确定性单元测试证明。
 - 待明天真机确认:heartbeat/深度源与 Hz、z 中位与各轴符号、解锁是否需 force、ArduSub 失联失效行为。
-- git commit: (真机准备提交)
+- git commit: be60b3c (已推送)
+
+### [真机准备2] 只读 failsafe 参数查询工具 — 2026-09-10
+- 用户要求:明天到场先用只读方式查 failsafe 参数。
+- 交付:`src/check_params.py`(严格只读,只发 PARAM_REQUEST_READ;默认读 FS_PILOT_INPUT/TIMEOUT、FS_GCS_ENABLE、FS_LEAK_* 等 failsafe 清单,带释义;--param 指定、--all 全量)。
+- SITL 加 PARAM_REQUEST_READ/LIST 应答(SIM_PARAMS 示意值)供离线联调。
+- 手册 FIELD_TEST.md 第 2 节改为"到场第一步:check_params 只读查 failsafe",并加入命令一览。
+- 离线验证 ✅:对 SITL 读出 10 个 failsafe 参数,只读无副作用。
+- git commit: (本条提交)

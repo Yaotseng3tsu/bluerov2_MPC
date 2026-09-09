@@ -35,14 +35,24 @@ cd C:\bluerov2_mpc
 
 ---
 
-## 2. 关键前提:确认 ArduSub 失联失效(硬崩溃兜底)
+## 2. 到场第一步:只读查询 failsafe 参数(硬崩溃兜底)
 
-我们的代码在**正常退出 / Ctrl+C** 时会自动回中位 + 上锁。但若进程**硬崩溃/断网**,来不及发上锁命令 —— 这时只能靠 ArduSub 自身的失效保护。**下水前必须确认**(今天干测也建议先看):
+我们的代码在**正常退出 / Ctrl+C** 时会自动回中位 + 上锁。但若进程**硬崩溃/断网**,来不及发上锁命令 —— 这时只能靠 ArduSub 自身的失效保护。所以**连上后第一件事就是只读地查一遍 failsafe 参数**:
 
-- 在 BlueOS/参数里确认 **Pilot input / GCS failsafe** 行为(停发 MANUAL_CONTROL 或 GCS 心跳后,ArduSub 会中和输出 / disarm)。
-- 记录:失联后行为 = ______,超时 ≈ ______ s。
+```powershell
+.\.venv\Scripts\python.exe -m src.check_params
+```
+- 【严格只读】此工具只发 `PARAM_REQUEST_READ`,**绝不修改任何参数、不解锁**。
+- 重点看:
+  - `FS_PILOT_INPUT`(手柄/MANUAL_CONTROL 失联动作,理想 = disarm 或至少中和)
+  - `FS_PILOT_TIMEOUT`(失联判定超时,秒)
+  - `FS_GCS_ENABLE`(地面站失联保护)
+  - `FS_LEAK_ENABLE`(漏水保护,入水前很重要)
+- 记录:`FS_PILOT_INPUT`=____,`FS_PILOT_TIMEOUT`=____ s,`FS_GCS_ENABLE`=____,`FS_LEAK_ENABLE`=____。
+- 如需查更多:`--param 名字1 名字2`,或 `--all` 拉全部(量大)。
 
-> 说明:仿真里我们用 `cmd-timeout≈1.5s` 模拟了这一行为并验证过;真机的实际值以此处确认为准。
+> 判断:若 `FS_PILOT_INPUT` 不是"失联即中和/ disarm",今天干测仍可继续(有人守 Ctrl+C);但**入水前**建议在 BlueOS 参数页调好。是否调整由你决定,本工具不改参数。
+> 说明:仿真里我们用 `cmd-timeout≈1.5s` 模拟过这一兜底行为;真机实际值以本步读数为准。
 
 ---
 
@@ -136,6 +146,7 @@ cd C:\bluerov2_mpc
 ## 附:今天会用到的命令一览
 ```powershell
 cd C:\bluerov2_mpc
+.\.venv\Scripts\python.exe -m src.check_params                           # 第一步:只读查 failsafe
 .\.venv\Scripts\python.exe -m src.link --check --seconds 30              # P0 自检
 .\.venv\Scripts\python.exe -m src.pseudo_stick --z 0.2 --seconds 3       # P1-a 未解锁不动
 .\.venv\Scripts\python.exe -m src.calibrate --axes xyzr                  # P1-b 标定(解锁)

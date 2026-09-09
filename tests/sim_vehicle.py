@@ -49,6 +49,20 @@ MAV_CMD_COMPONENT_ARM_DISARM = 400
 MAV_CMD_DO_SET_MODE = 176
 MAV_RESULT_ACCEPTED = 0
 
+# 仿真用的失效保护参数(仅供 check_params.py 离线联调;数值为示意)
+SIM_PARAMS = {
+    "FS_PILOT_INPUT": 2,      # 0禁用 1警告 2 disarm
+    "FS_PILOT_TIMEOUT": 3.0,  # s
+    "FS_GCS_ENABLE": 1,
+    "FS_LEAK_ENABLE": 1,
+    "FS_LEAK_ACTION": 1,
+    "FS_CRASH_CHECK": 1,
+    "FS_EKF_ACTION": 1,
+    "FS_EKF_THRESH": 0.8,
+    "FS_BATT_ENABLE": 0,
+    "BATT_LOW_VOLT": 0.0,
+}
+
 
 def z_to_u(z_channel: int) -> float:
     """MANUAL_CONTROL z (0..1000, 500 中位) -> u∈[-1,1], +u 下潜。"""
@@ -171,6 +185,19 @@ def main() -> int:
                 elif t == "SET_MODE":
                     state["mode"] = m.custom_mode
                     send_heartbeat()
+                elif t == "PARAM_REQUEST_READ":
+                    pid = m.param_id
+                    if isinstance(pid, bytes):
+                        pid = pid.split(b"\x00")[0].decode(errors="ignore")
+                    if pid in SIM_PARAMS:
+                        names = list(SIM_PARAMS)
+                        mav.param_value_send(pid.encode(), float(SIM_PARAMS[pid]),
+                                             9, len(names), names.index(pid))  # type=REAL32
+                elif t == "PARAM_REQUEST_LIST":
+                    names = list(SIM_PARAMS)
+                    for i, k in enumerate(names):
+                        mav.param_value_send(k.encode(), float(SIM_PARAMS[k]),
+                                             9, len(names), i)
 
         # --- 积分动力学 ---
         if args.demo:
