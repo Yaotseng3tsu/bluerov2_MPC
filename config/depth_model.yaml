@@ -1,0 +1,27 @@
+# BlueROV2 深度 (heave) 动力学参数
+#
+# sim_truth : SITL 仿真使用的"真值"模型 (取自通用 BlueROV2 文献 + Einarsson 论文量级)。
+#             真机上这些参数未知,P3 系统辨识会重新估计。
+# identified: P3 辨识结果 (回填);MPC (P5) 使用它,以体现"模型≠真值"的鲁棒性。
+#
+# 约定: 深度 z 向下为正; w=dz/dt。
+# 参考量级 (BlueROV2 heavy):
+#   m≈11.5 kg, 附加质量 Z_wdot≈-14.6 → eff_mass≈26 kg
+#   线性阻尼 |Z_w|≈5.2 N/(m/s), 二次阻尼 |Z_w|w||≈37 N/(m/s)^2
+#   垂直推力: 满量程约数十 N;此处 u=1 取 80 N
+#   略正浮 (B>W) → net_buoy 取 -2 N (无推力时缓慢上浮,使定深非平凡)
+
+sim_truth:
+  eff_mass: 26.0        # kg  (m - Z_wdot)
+  c_lin: 5.2            # N/(m/s)
+  c_quad: 37.0          # N/(m/s)^2
+  K_thrust_N: 80.0      # N   (u=1 的垂直推力)
+  net_buoy_N: -2.0      # N   (略正浮,下潜为正系下为负)
+  u_max: 1.0
+
+identified:             # <-- P3 系统辨识后回填
+  eff_mass: null
+  c_lin: null
+  c_quad: null
+  K_thrust_N: null
+  net_buoy_N: null

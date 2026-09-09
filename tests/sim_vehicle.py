@@ -1,20 +1,29 @@
 #!/usr/bin/env python3
-"""离线 MAVLink 模拟器 —— 假 ArduSub,用于在无真机时验证 src/link.py。
+"""BlueROV2 深度 SITL —— 闭环 MAVLink 仿真 (软件在环)。
 
-它向 udpout 目标 (默认 127.0.0.1:14550) 发送:
-  - HEARTBEAT  (1 Hz, type=SUBMARINE, autopilot=ARDUPILOTMEGA, DISARMED, MANUAL 模式)
-  - GLOBAL_POSITION_INT (10 Hz),深度按正弦在 0~1 m 之间变化 (relative_alt 水下为负)
+模拟一台"假 ArduSub":
+  - 接收上位机的 MANUAL_CONTROL,取 z 通道 → 归一化 u∈[-1,1] (z∈[0,1000], 500=中位, +u 下潜)
+  - 用 src/plant.py 的深度动力学积分
+  - 以 MAVLink 回传 HEARTBEAT (1Hz) + GLOBAL_POSITION_INT (深度, 10Hz)
 
-用法 (两个终端):
-  终端A:  python tests/sim_vehicle.py
-  终端B:  python -m src.link --check --seconds 12
+网络 (Windows 友好):
+  SITL 自绑定 UDP 端口 (默认 14551),向控制器 (默认 127.0.0.1:14550) 主动推遥测;
+  控制器用 udpin:0.0.0.0:14550 (与真机一致),收到遥测后把指令回发到 14551。
+  两端都 bind,规避 pymavlink udpout 在 Windows 上 recvfrom 的 WSAEINVAL 问题。
 
-说明:link.py 用 udpin:0.0.0.0:14550 监听;本模拟器用 udpout 主动推流。
+模式:
+  默认 (闭环):  python tests/sim_vehicle.py
+  P0 演示 (正弦, 忽略指令):  python tests/sim_vehicle.py --demo
+
+约定:z 深度向下为正。
 """
 from __future__ import annotations
 
 import argparse
+import errno
 import math
+import os
+import socket
 import sys
 import time
 
@@ -24,66 +33,134 @@ for _s in (sys.stdout, sys.stderr):
     except Exception:
         pass
 
-from pymavlink import mavutil
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from pymavlink.dialects.v20 import ardupilotmega as mav2  # noqa: E402
+from src.plant import DepthParams, DepthPlant  # noqa: E402
+
+MAV_TYPE_SUBMARINE = 12
+MAV_AUTOPILOT_ARDUPILOTMEGA = 3
+MAV_MODE_FLAG_CUSTOM_MODE_ENABLED = 1
+MAV_STATE_STANDBY = 3
+MANUAL_MODE = 19
 
 
-def build_base_mode(mavutil) -> int:
-    # 使用 custom_mode + DISARMED (不含 SAFETY_ARMED 位)
-    return mavutil.mavlink.MAV_MODE_FLAG_CUSTOM_MODE_ENABLED
+def z_to_u(z_channel: int) -> float:
+    """MANUAL_CONTROL z (0..1000, 500 中位) -> u∈[-1,1], +u 下潜。"""
+    return max(-1.0, min(1.0, (z_channel - 500) / 500.0))
+
+
+class _Writer:
+    """给 mavlink2.MAVLink 用的 file-like 写出口,固定发往控制器地址。"""
+
+    def __init__(self, sock: socket.socket, dest):
+        self.sock = sock
+        self.dest = dest
+
+    def write(self, buf):
+        try:
+            self.sock.sendto(buf, self.dest)
+        except OSError:
+            pass
 
 
 def main() -> int:
-    p = argparse.ArgumentParser(description="假 ArduSub MAVLink 模拟器")
-    p.add_argument("--target", default="udpout:127.0.0.1:14550",
-                   help="发送目标 (link.py 监听的地址)")
+    p = argparse.ArgumentParser(description="BlueROV2 深度 SITL")
+    p.add_argument("--bind-port", type=int, default=14551, help="SITL 自身绑定端口")
+    p.add_argument("--ctrl-addr", default="127.0.0.1:14550",
+                   help="控制器监听地址 (遥测发往此处)")
     p.add_argument("--seconds", type=float, default=0.0, help="运行时长,0=直到 Ctrl+C")
-    p.add_argument("--period", type=float, default=8.0, help="深度正弦周期 (s)")
-    p.add_argument("--depth-amp", type=float, default=0.5, help="深度振幅 (m),中心=振幅")
+    p.add_argument("--demo", action="store_true",
+                   help="P0 演示:忽略指令,深度按正弦变化")
+    p.add_argument("--period", type=float, default=8.0, help="demo 正弦周期 (s)")
+    p.add_argument("--depth-amp", type=float, default=0.5, help="demo 深度振幅 (m)")
+    p.add_argument("--cmd-timeout", type=float, default=1.5,
+                   help="超过该秒数未收到指令则 u=0 (仿真 failsafe)")
+    p.add_argument("--z0", type=float, default=0.0, help="初始深度 (m)")
     args = p.parse_args()
 
-    mav = mavutil.mavlink_connection(
-        args.target, source_system=1, source_component=1, dialect="ardupilotmega",
-    )
-    # ArduSub MANUAL 模式号
-    manual_mode = mavutil.mode_mapping_sub.get("MANUAL", 19)
-    base_mode = build_base_mode(mavutil)
+    host, port = args.ctrl_addr.split(":")
+    dest = (host, int(port))
 
-    print(f"[sim] 向 {args.target} 推流 (Ctrl+C 停止)。DISARMED, MANUAL, 深度 0~{2*args.depth_amp:.1f}m")
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    sock.bind(("0.0.0.0", args.bind_port))
+    sock.setblocking(False)
 
+    mav = mav2.MAVLink(_Writer(sock, dest), srcSystem=1, srcComponent=1)
+
+    params = DepthParams.from_yaml()
+    plant = DepthPlant(params, z0=args.z0)
+
+    mode = "DEMO(正弦,忽略指令)" if args.demo else "闭环(响应 MANUAL_CONTROL)"
+    print(f"[sitl] bind :{args.bind_port} → 遥测发往 {dest}。模式={mode}  DISARMED/MANUAL")
+    print(f"[sitl] plant: eff_mass={params.eff_mass} c_lin={params.c_lin} "
+          f"c_quad={params.c_quad} K={params.K_thrust_N}N net_buoy={params.net_buoy_N}N")
+
+    def send_heartbeat():
+        mav.heartbeat_send(MAV_TYPE_SUBMARINE, MAV_AUTOPILOT_ARDUPILOTMEGA,
+                           MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, MANUAL_MODE, MAV_STATE_STANDBY)
+
+    sim_hz = 50.0
+    dt = 1.0 / sim_hz
     t0 = time.monotonic()
-    last_hb = 0.0
-    hz = 10.0
-    dt = 1.0 / hz
+    last_hb = last_pos = last_log = 0.0
+    last_cmd_t = -1e9
+    u = 0.0
+
+    send_heartbeat()  # 先喊一声,让控制器学到本 SITL 地址
+
     while True:
         now = time.monotonic()
         el = now - t0
         if args.seconds > 0 and el >= args.seconds:
             break
 
-        # 1 Hz heartbeat
+        # --- 接收指令 (吸收所有待处理报文) ---
+        while True:
+            try:
+                data, _addr = sock.recvfrom(4096)
+            except OSError as e:
+                if e.errno in (errno.EWOULDBLOCK, errno.EAGAIN, 10035):
+                    break
+                break
+            if not data:
+                break
+            try:
+                msgs = mav.parse_buffer(data) or []
+            except Exception:
+                msgs = []
+            for m in msgs:
+                if m.get_type() == "MANUAL_CONTROL":
+                    u = z_to_u(m.z)
+                    last_cmd_t = now
+
+        # --- 积分动力学 ---
+        if args.demo:
+            depth = args.depth_amp * (1 - math.cos(2 * math.pi * el / args.period))
+            plant.z = depth
+        else:
+            if now - last_cmd_t > args.cmd_timeout:
+                u = 0.0  # 仿真 failsafe
+            plant.step(u, dt)
+            depth = plant.z
+
+        # --- 遥测 ---
         if now - last_hb >= 1.0:
             last_hb = now
-            mav.mav.heartbeat_send(
-                mavutil.mavlink.MAV_TYPE_SUBMARINE,
-                mavutil.mavlink.MAV_AUTOPILOT_ARDUPILOTMEGA,
-                base_mode, manual_mode,
-                mavutil.mavlink.MAV_STATE_STANDBY,
-            )
-
-        # 10 Hz GLOBAL_POSITION_INT:深度正弦 (0 ~ 2*amp),relative_alt 水下为负(mm)
-        depth_m = args.depth_amp * (1 - math.cos(2 * math.pi * el / args.period))
-        rel_alt_mm = int(-depth_m * 1000)
-        mav.mav.global_position_int_send(
-            int(el * 1000),      # time_boot_ms
-            356800000, 1396000000,  # lat, lon (占位)
-            0, rel_alt_mm,       # alt(mm), relative_alt(mm)
-            0, 0, 0,             # vx, vy, vz
-            0,                   # hdg
-        )
+            send_heartbeat()
+        if now - last_pos >= 0.1:
+            last_pos = now
+            rel_alt_mm = int(-depth * 1000)  # 水下为负
+            mav.global_position_int_send(int(el * 1000), 356800000, 1396000000,
+                                         0, rel_alt_mm, 0, 0, 0, 0)
+        if now - last_log >= 0.5:
+            last_log = now
+            print(f"[sitl] t={el:5.1f}s  u={u:+.2f}  depth={depth:+.3f}m  w={plant.w:+.3f}m/s")
 
         time.sleep(dt)
 
-    print("[sim] 结束。")
+    print("[sitl] 结束。")
     return 0
 
 

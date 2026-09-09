@@ -35,6 +35,34 @@
 
 > **监管协议**:每个阶段结束都必须经过你的确认才进入下一阶段。每阶段的目的、命令、结果、问题都会记录在 [`PROGRESS.md`](PROGRESS.md),并做一次 git 提交。详见第 8 节。
 
+### 1.1 仿真环境(SITL)—— 无真机时的开发闭环
+
+参考 [HKPolyU-UAV/bluerov2](https://github.com/HKPolyU-UAV/bluerov2) 的"先仿真后真机"思路,本项目自带一个**极简软件在环(SITL)**,让 P1–P5 全流程在没有机器人时就能开发验证:
+
+- [`src/plant.py`](src/plant.py):BlueROV2 **深度(heave)动力学模型**(有效质量+线性/二次阻尼+剩余浮力+推力,RK4 积分)。它**同时**给 SITL 当"真值"、给 MPC(P5)当"内部预测模型"。参数在 [`config/depth_model.yaml`](config/depth_model.yaml)。
+- [`tests/sim_vehicle.py`](tests/sim_vehicle.py):**闭环 MAVLink SITL**,像真 ArduSub 一样接收 `MANUAL_CONTROL` → 积分动力学 → 回传深度遥测。
+
+**关键点:控制代码对仿真和真机使用完全相同的 MAVLink 接口**,只是连接对端不同。
+
+```text
+[控制器: link/pseudo_stick/pid/mpc]  udpin:0.0.0.0:14550
+        │  MANUAL_CONTROL ↓            ↑ HEARTBEAT + 深度
+[SITL: tests/sim_vehicle.py]  bind :14551 → 遥测发往 127.0.0.1:14550
+        (真机时: 换成 BlueOS 的 UDP endpoint,控制器代码不变)
+```
+
+运行(两个终端):
+```powershell
+cd C:\bluerov2_mpc
+.\.venv\Scripts\python.exe tests\sim_vehicle.py             # 终端A:闭环 SITL
+.\.venv\Scripts\python.exe -m src.pseudo_stick --demo-heave  # 终端B:下潜2s→上浮2s→停
+# P0 连接自检(SITL 用 --demo 正弦模式):
+.\.venv\Scripts\python.exe tests\sim_vehicle.py --demo
+.\.venv\Scripts\python.exe -m src.link --check --seconds 12
+```
+
+> ⚠ 仿真里 `MANUAL_CONTROL` 的 z 采用 `0..1000、500 中位、+ 下潜` 约定;**真机的 z 中位与正负号仍需 P1 实测确认**(见第 3 节)。
+
 ---
 
 ## 2. 环境配置
