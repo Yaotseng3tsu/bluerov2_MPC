@@ -77,7 +77,13 @@ def main() -> int:
     p.add_argument("--cmd-timeout", type=float, default=1.5,
                    help="超过该秒数未收到指令则 u=0 (仿真 failsafe)")
     p.add_argument("--z0", type=float, default=0.0, help="初始深度 (m)")
+    p.add_argument("--depth-noise", type=float, default=0.0,
+                   help="回传深度上叠加的高斯噪声 std (m),模拟压力计噪声")
+    p.add_argument("--noise-seed", type=int, default=12345, help="噪声随机种子")
     args = p.parse_args()
+
+    import random as _random
+    rng = _random.Random(args.noise_seed)
 
     host, port = args.ctrl_addr.split(":")
     dest = (host, int(port))
@@ -151,7 +157,10 @@ def main() -> int:
             send_heartbeat()
         if now - last_pos >= 0.1:
             last_pos = now
-            rel_alt_mm = int(-depth * 1000)  # 水下为负
+            depth_report = depth
+            if args.depth_noise > 0:
+                depth_report += rng.gauss(0.0, args.depth_noise)
+            rel_alt_mm = int(-depth_report * 1000)  # 水下为负
             mav.global_position_int_send(int(el * 1000), 356800000, 1396000000,
                                          0, rel_alt_mm, 0, 0, 0, 0)
         if now - last_log >= 0.5:

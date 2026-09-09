@@ -10,6 +10,11 @@ connection:
 control:
   CTRL_HZ: 10                       # 主控制循环频率 (Hz)
 
+state:                              # P2 深度状态估计 (2 阶卡尔曼)
+  meas_sigma: 0.03                  # m, 深度测量噪声 std (P2 静止标定后回填)
+  process_accel_sigma: 0.5          # m/s^2, 过程加速度噪声谱 (KF 调参)
+  max_age_s: 0.5                    # 深度超龄阈值 (P4 控制器看门狗使用)
+
 safety:
   U_MAX: 0.3                        # 归一化指令上限 |u| (第一阶段保守值)
   WATCHDOG_MS: 300                  # 超时未发新指令则回中位

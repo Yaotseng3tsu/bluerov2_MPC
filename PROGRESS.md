@@ -66,4 +66,20 @@
   - "看门狗"在 P1 = (a) 退出/中断回中位 + (b) 载具侧 MANUAL_CONTROL 失联失效;**不是**控制器里的独立计时器。控制器侧带遥测超时的看门狗属于 P2+(需深度反馈)。
   - SITL 的 cmd-timeout=1.5s 是对 ArduSub 失联行为的**模拟**;真机上 ArduSub 的实际失联超时/是否 disarm 需 P1 现场确认。
   - z 中位=500、+z 下潜为 SITL 约定;真机符号/中位仍需 P1 实测。
-- git commit: (P1 安全验证提交)
+- git commit: 2a7b040 (已推送)
+
+### [Phase 2] 深度状态估计 (state.py + 噪声验证) — 2026-09-10
+- 范围(经确认):只做 state.py + 噪声验证;控制器看门狗(超龄回中位)留到 P4。
+- 决定:估计器用 **2 阶卡尔曼(恒速模型)**。
+- 交付:
+  - `src/state.py` —— `KalmanDepth`(变步长 KF) + `DepthEstimator`(时间戳/age/valid 封装);可 `python -m src.state` 对 SITL 打印估计。
+  - `tests/sim_vehicle.py` +`--depth-noise σ`(高斯深度噪声,固定种子)。
+  - `config/vehicle.yaml` + `state` 段(meas_sigma=0.03, process_accel_sigma=0.5, max_age_s=0.5)。
+  - `tests/verify_state.py` —— 确定性数值验证。
+- 验证结果(✅ 全部通过):注入 σ=0.030→反算 0.029;深度 RMSE 0.0295→0.0229(KF 降噪);速率 RMSE 0.135 m/s、不发散;速率时延≈100 ms(1 周期)。MAVLink 通路冒烟测试:含噪 SITL→state.py 输出平滑 z_kf/rate_kf,age≈0ms,valid=True。
+- 权衡说明:process_accel_sigma 控制"平滑↔时延";当前偏响应(时延小)。真机标定 σ 后可再调。
+- 仍未做(移交后续阶段):
+  - **控制器侧看门狗**(深度超龄→回中位):age/valid 接口已就绪,但"回中位动作"在 P4 闭环里接。
+  - **真机 σ 标定**:静止实测深度噪声,回填 meas_sigma(需真机)。
+  - **真机深度到达率/时延实测**:确认 GLOBAL_POSITION_INT 实际 Hz 与抖动(需真机)。
+- git commit: (P2 提交)

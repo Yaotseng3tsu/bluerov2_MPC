@@ -226,5 +226,12 @@ mpc:      { dt: 0.1, N: 20, Q_pos: 10.0, Q_vel: 1.0, R: 0.1, R_du: 0.5, u_limit:
 
 ## 10. 当前状态
 
-**已完成**:项目骨架 + 本文档 + 配置模板 + 本地 git 初始化。
-**下一步(待你确认)**:进入 **Phase 0**,编写 `src/link.py` 连接自检脚本并在你监管下联机测试。
+**已完成(仿真层面)**:
+- 项目骨架 + 文档 + 本地 git/GitHub。
+- **P0** 连接自检 `src/link.py`(离线用模拟器验证)。
+- **SITL** 深度动力学 `src/plant.py` + 闭环 MAVLink 仿真 `tests/sim_vehicle.py`。
+- **P1** 伪手柄 `src/pseudo_stick.py` + 安全逻辑严格验证(单元 7/7 + SITL 集成)。
+- **P2** 深度状态估计 `src/state.py`(2 阶卡尔曼)+ 噪声验证 `tests/verify_state.py`(全部通过)。
+
+**待真机复核**:P0/P1 联机、z 中位与符号、ArduSub 失联行为、深度噪声 σ 标定与到达率。
+**后续阶段(可离线继续)**:P3 系统辨识框架、**P4 PID 定深(基线)**、P5 MPC 定深、控制器侧看门狗(接在 P4)。
