@@ -99,6 +99,10 @@ def main() -> int:
     p.add_argument("--depth-noise", type=float, default=0.0,
                    help="回传深度上叠加的高斯噪声 std (m),模拟压力计噪声")
     p.add_argument("--noise-seed", type=int, default=12345, help="噪声随机种子")
+    p.add_argument("--disturb-force", type=float, default=0.0,
+                   help="扰动力 N (下潜为正,恒定),模拟缆线拉力/水流")
+    p.add_argument("--disturb-at", type=float, default=1e9, help="扰动起始时刻 (s)")
+    p.add_argument("--disturb-dur", type=float, default=1e9, help="扰动持续 (s)")
     args = p.parse_args()
 
     import random as _random
@@ -208,6 +212,11 @@ def main() -> int:
                 u = 0.0  # 仿真 failsafe
             # 真机行为:未 arm 时推进器不转
             u_eff = u if state["armed"] else 0.0
+            # 扰动力窗口
+            if args.disturb_at <= el < args.disturb_at + args.disturb_dur:
+                plant.ext_force = args.disturb_force
+            else:
+                plant.ext_force = 0.0
             plant.step(u_eff, dt)
             depth = plant.z
 

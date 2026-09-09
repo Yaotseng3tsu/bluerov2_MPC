@@ -104,4 +104,19 @@
 - SITL 加 PARAM_REQUEST_READ/LIST 应答(SIM_PARAMS 示意值)供离线联调。
 - 手册 FIELD_TEST.md 第 2 节改为"到场第一步:check_params 只读查 failsafe",并加入命令一览。
 - 离线验证 ✅:对 SITL 读出 10 个 failsafe 参数,只读无副作用。
-- git commit: (本条提交)
+- git commit: 1466abf (已推送)
+
+### [Phase 4] PID 定深基线(SITL)— 2026-09-10
+- 目标:第一个深度闭环,PID 定深,建立 MPC 的对比基线;并接入 P2 推迟的控制器侧看门狗。
+- 交付:
+  - `src/pid.py`(PID:微分作用于测量 + 饱和条件积分抗饱和 + 限幅)。
+  - `src/depth_control.py`(P4/P5 通用闭环:连接/解锁 + KF 状态 + 控制器可插拔 + **控制器侧看门狗(深度超龄→中位)** + 深度软限位 + CSV 记录)。
+  - `src/metrics.py`(上升/超调/调节/稳态RMSE/控制能量/抗扰恢复)。
+  - `tests/analyze_depth.py`(CSV→指标+出图)。
+  - plant/SITL 加扰动力注入(`--disturb-force/-at/-dur`,plant.ext_force)。
+  - 结果:`docs/RESULTS_P4.md` + `docs/baseline/`(图+CSV)。
+- 基线指标(SITL,噪声0.02m):阶跃0.5→1.0m 上升1.02s、超调11.9%、稳态RMSE 0.037m、能量1.04;抗扰12N 峰值偏移0.127m、积分稳态u≈-0.14抵消、能量1.13。
+- 踩坑:①启动瞬态——预热2.5s未控致浮力上浮冲出软限位→改短预热(KF初始化即控)+SITL 从水下 z0 起;②settle/recovery 用"最后离带"定义对噪声敏感→以 rmse_ss/峰值偏移为准。
+- 控制器侧看门狗已接入并验证(STALE→中位;正常运行 0 次触发)。
+- 待真机:PID 增益需按 P3 辨识/实测重调;真机噪声与到达率影响 KF/微分。
+- git commit: (P4 提交)

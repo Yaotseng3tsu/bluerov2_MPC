@@ -232,6 +232,8 @@ mpc:      { dt: 0.1, N: 20, Q_pos: 10.0, Q_vel: 1.0, R: 0.1, R_du: 0.5, u_limit:
 - **SITL** 深度动力学 `src/plant.py` + 闭环 MAVLink 仿真 `tests/sim_vehicle.py`。
 - **P1** 伪手柄 `src/pseudo_stick.py` + 安全逻辑严格验证(单元 7/7 + SITL 集成)。
 - **P2** 深度状态估计 `src/state.py`(2 阶卡尔曼)+ 噪声验证 `tests/verify_state.py`(全部通过)。
+- **P4** PID 定深闭环基线 `src/depth_control.py`+`src/pid.py`+`src/metrics.py`,含控制器侧看门狗;基线指标见 [`docs/RESULTS_P4.md`](docs/RESULTS_P4.md)(阶跃超调~12%、稳态RMSE 3.7cm、抗扰峰值偏移~13cm)。
+- **真机准备**:解锁/上锁 + 方向标定 `src/calibrate.py` + 只读 failsafe 查询 `src/check_params.py` + 现场手册 `docs/FIELD_TEST.md`。
 
-**待真机复核**:P0/P1 联机、z 中位与符号、ArduSub 失联行为、深度噪声 σ 标定与到达率。
-**后续阶段(可离线继续)**:P3 系统辨识框架、**P4 PID 定深(基线)**、P5 MPC 定深、控制器侧看门狗(接在 P4)。
+**待真机复核**:P0/P1 联机、z 中位与符号、ArduSub 失联行为、深度噪声 σ 标定与到达率、PID 增益重调。
+**后续阶段**:P3 系统辨识(需真机数据)、**P5 MPC 定深**(复用 `depth_control` 框架,与 P4 基线对比)。

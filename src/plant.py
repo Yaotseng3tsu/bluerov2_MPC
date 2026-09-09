@@ -54,11 +54,13 @@ class DepthPlant:
         self.p = params
         self.z = float(z0)
         self.w = float(w0)
+        self.ext_force = 0.0   # 外部扰动力 (N,下潜为正),如缆线拉力/水流
 
     def _deriv(self, z: float, w: float, u: float):
         p = self.p
         u = max(-p.u_max, min(p.u_max, u))
-        F = p.K_thrust_N * u + p.net_buoy_N - p.c_lin * w - p.c_quad * w * abs(w)
+        F = (p.K_thrust_N * u + p.net_buoy_N + self.ext_force
+             - p.c_lin * w - p.c_quad * w * abs(w))
         return w, F / p.eff_mass
 
     def step(self, u: float, dt: float) -> tuple[float, float]:
