@@ -119,4 +119,12 @@
 - 踩坑:①启动瞬态——预热2.5s未控致浮力上浮冲出软限位→改短预热(KF初始化即控)+SITL 从水下 z0 起;②settle/recovery 用"最后离带"定义对噪声敏感→以 rmse_ss/峰值偏移为准。
 - 控制器侧看门狗已接入并验证(STALE→中位;正常运行 0 次触发)。
 - 待真机:PID 增益需按 P3 辨识/实测重调;真机噪声与到达率影响 KF/微分。
-- git commit: (P4 提交)
+- git commit: e5ea12d (已推送)
+
+### [Phase 5] MPC 定深 vs PID(SITL)— 2026-09-10
+- 目标:CasADi 非线性 MPC 定深,复用 depth_control 框架,与 P4 基线同工况对比。
+- 交付:`src/mpc.py`(NMPC:RK4 模型/输入硬约束/offset-free 扰动观测器/延迟补偿/IPOPT 热启动);config `mpc` 段补 dist_gain、delay_comp;`docs/RESULTS_P5.md` + `docs/baseline/compare_pid_mpc.png`。
+- 最终对比(SITL 噪声0.02m,同噪声实现):阶跃超调 PID11.9% vs MPC10.6%;稳态RMSE 0.037 vs 0.040;控制能量 1.04 vs 1.40(PID更省);抗扰峰值偏移 0.13 vs 0.21m,稳态误差 1.6 vs 2.8cm(两者都offset-free);|u|≤0.3 MPC为优化内硬约束。
+- 诚实结论:**1维SISO定深调好的PID很强,MPC难显著拉开(公认结论,非实现问题)**。MPC价值在硬约束/多DOF/参考预测,本工况未激发。保留基础设施,待真机P3辨识+约束场景重评估(与用户约定真机后调)。
+- 调参历程记录:初版MPC含噪反差(超调14%、能量1.6)→ 定位为①扰动观测器×KF滞后致极限环 ②KF速度滞后+传输延迟致刹车晚;→ 加offset-free观测器(可配增益)+延迟补偿,权重Q_vel=3/R_du=1;最终与PID相当。
+- git commit: (P5 提交)

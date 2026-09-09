@@ -235,5 +235,7 @@ mpc:      { dt: 0.1, N: 20, Q_pos: 10.0, Q_vel: 1.0, R: 0.1, R_du: 0.5, u_limit:
 - **P4** PID 定深闭环基线 `src/depth_control.py`+`src/pid.py`+`src/metrics.py`,含控制器侧看门狗;基线指标见 [`docs/RESULTS_P4.md`](docs/RESULTS_P4.md)(阶跃超调~12%、稳态RMSE 3.7cm、抗扰峰值偏移~13cm)。
 - **真机准备**:解锁/上锁 + 方向标定 `src/calibrate.py` + 只读 failsafe 查询 `src/check_params.py` + 现场手册 `docs/FIELD_TEST.md`。
 
-**待真机复核**:P0/P1 联机、z 中位与符号、ArduSub 失联行为、深度噪声 σ 标定与到达率、PID 增益重调。
-**后续阶段**:P3 系统辨识(需真机数据)、**P5 MPC 定深**(复用 `depth_control` 框架,与 P4 基线对比)。
+- **P5** MPC 定深 `src/mpc.py`(CasADi NMPC:输入硬约束 + offset-free 扰动观测 + 延迟补偿),与 PID 基线对比见 [`docs/RESULTS_P5.md`](docs/RESULTS_P5.md)。结论:1 维定深两者相当(PID 更省力、MPC 超调略小、都 offset-free);MPC 的约束/多 DOF/预测优势待真机+约束场景激发。
+
+**待真机复核**:P0/P1 联机、z 中位与符号、ArduSub 失联行为、深度噪声 σ 标定与到达率、PID/MPC 参数重调。
+**后续阶段**:P3 系统辨识(需真机数据)→ 用真实模型重评估 MPC;P6 扩展(多 DOF / yaw / RL)。
