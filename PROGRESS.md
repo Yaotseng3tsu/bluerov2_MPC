@@ -82,4 +82,18 @@
   - **控制器侧看门狗**(深度超龄→回中位):age/valid 接口已就绪,但"回中位动作"在 P4 闭环里接。
   - **真机 σ 标定**:静止实测深度噪声,回填 meas_sigma(需真机)。
   - **真机深度到达率/时延实测**:确认 GLOBAL_POSITION_INT 实际 Hz 与抖动(需真机)。
-- git commit: (P2 提交)
+- git commit: 5f6a557 (已推送)
+
+### [真机准备] 解锁/上锁 + 方向标定 + 现场手册 — 2026-09-10(明天实测用)
+- 背景:明天上机实测。决定:出水台架干测优先 / 代码解锁+自动上锁 / 目标到 P1(让推进器动起来)。
+- 关键认知:真机上 **armed 才会驱动推进器**(仿真从不 arm),所以 P1 必须处理解锁。
+- 交付/改动:
+  - `src/pseudo_stick.py` + 解锁能力:`set_mode`(反向 mode 映射修复)、`arm(force)`/`disarm`、GCS 心跳、`--arm/--force-arm/--mode/--yes`;**退出/中断自动上锁**(fire-and-forget 多发上锁命令,不依赖收 ACK)。
+  - `tests/sim_vehicle.py`:模拟真机 arm/mode(COMMAND_LONG/SET_MODE + ACK,heartbeat 反映 armed);**未 arm 时推进器不动**。
+  - `src/calibrate.py`:引导式逐轴方向/中位标定,把 sign_* 写回 config(保留注释)。
+  - `src/link.py`:自检小结加实测深度 Hz + 深度源 + 低速率告警。
+  - `docs/FIELD_TEST.md`:现场手册(安全总则/BlueOS 端点/失联失效确认/P0→P1-a→P1-b→P1-c 步骤+通过标准+排查+收尾)。
+- 离线验证(SITL,✅):未解锁指令无效;--arm 后 set MANUAL+解锁→指令驱动→退出自动上锁;标定写回 config;安全单元测试扩到 9/9(含解锁后自动上锁、未解锁不误上锁)。
+- Windows 提醒:kill -INT 无法可靠投递 SIGINT,故 Ctrl+C→上锁改用确定性单元测试证明。
+- 待明天真机确认:heartbeat/深度源与 Hz、z 中位与各轴符号、解锁是否需 force、ArduSub 失联失效行为。
+- git commit: (真机准备提交)

@@ -26,7 +26,7 @@ manual_control:                     # <-- Phase 1 实测后回填
   z_neutral: 500                    # TODO: z 中位整型值 (电机停转)
   sign_x: 1                         # TODO: +x 是否对应前进
   sign_y: 1                         # TODO
-  sign_z: 1                         # TODO: +z 是否对应下潜(与深度正方向一致)
+  sign_z: 1                          # TODO: +z 是否对应下潜(与深度正方向一致)
   sign_r: 1                         # TODO
 
 depth_model:                        # <-- Phase 3 辨识后回填 (二阶模型)

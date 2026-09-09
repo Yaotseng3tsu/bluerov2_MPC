@@ -145,13 +145,19 @@ def run_check(conn, mavutil, depth_msg: str, seconds: float) -> int:
                 print(f"  depth = {depth_m:+.3f} m  ({t}.{field})")
 
     span = depth_max - depth_min if depth_count else 0.0
+    depth_hz = depth_count / seconds if seconds > 0 else 0.0
+    hb_hz = hb_count / seconds if seconds > 0 else 0.0
     print("\n[link] === 自检小结 ===")
-    print(f"  heartbeat 收到 {hb_count} 帧")
-    print(f"  深度帧 {depth_count} 帧,范围 [{depth_min:+.3f}, {depth_max:+.3f}] m,跨度 {span:.3f} m")
+    print(f"  heartbeat {hb_count} 帧 ({hb_hz:.1f} Hz)")
+    print(f"  深度 {depth_count} 帧 ({depth_hz:.1f} Hz),源={depth_msg},"
+          f"范围 [{depth_min:+.3f}, {depth_max:+.3f}] m,跨度 {span:.3f} m")
     ok = hb_count > 0 and depth_count > 0
     if not ok:
         print("  ❌ 未同时收到 heartbeat 与深度,链路/配置需排查。")
         return 1
+    if depth_hz < 3.0:
+        print(f"  ⚠ 深度到达率偏低 ({depth_hz:.1f} Hz) —— 闭环建议 ≥ CTRL_HZ;"
+              f"可提高 SET_MESSAGE_INTERVAL 或换深度源。")
     if span < 0.02:
         print("  ⚠ 深度几乎无变化 —— 若你确实移动了 ROV,检查深度源是否正确。")
     print("  ✅ 链路 OK:heartbeat + 深度均可读。")

@@ -20,10 +20,17 @@ from src import pseudo_stick as ps  # noqa: E402
 
 class FakeMav:
     def __init__(self):
-        self.sends = []  # list of (x,y,z,r)
+        self.sends = []      # list of (x,y,z,r)
+        self.commands = []   # list of (command, param1)
 
     def manual_control_send(self, target, x, y, z, r, buttons):
         self.sends.append((x, y, z, r))
+
+    def command_long_send(self, tsys, tcomp, command, conf, p1, p2, p3, p4, p5, p6, p7):
+        self.commands.append((command, p1))
+
+    def heartbeat_send(self, *a, **k):
+        pass
 
 
 class FakeConn:
@@ -154,6 +161,34 @@ def test_interrupt_path_sends_neutral():
     print("✅ 中断(Ctrl+C)路径回中位 OK (rc=130, 末帧=中位)")
 
 
+def test_close_disarms_when_armed():
+    """本进程解锁过 (armed_by_us=True) → close() 必须发出上锁命令且末帧中位。"""
+    from pymavlink import mavutil
+    arm_cmd = mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM
+    s = make_stick()
+    s.armed_by_us = True
+    s.send(z=0.3)
+    s.close()
+    disarms = [c for c in s.conn.mav.commands if c[0] == arm_cmd and c[1] < 0.5]
+    assert len(disarms) >= 1, f"close 应发出至少一条上锁命令,实际={s.conn.mav.commands}"
+    assert s.conn.mav.sends[-1] == (0, 0, 500, 0), "末帧必须是中位"
+    assert not s.armed_by_us, "上锁后 armed_by_us 应清零"
+    print(f"✅ 解锁后退出自动上锁 OK (发出 {len(disarms)} 条上锁命令)")
+
+
+def test_close_no_disarm_when_not_armed():
+    """未经本进程解锁 → close() 不应发上锁命令 (不误动他人解锁的载具)。"""
+    from pymavlink import mavutil
+    arm_cmd = mavutil.mavlink.MAV_CMD_COMPONENT_ARM_DISARM
+    s = make_stick()
+    s.armed_by_us = False
+    s.send(z=0.2)
+    s.close()
+    disarms = [c for c in s.conn.mav.commands if c[0] == arm_cmd]
+    assert len(disarms) == 0, "未解锁时不应发上锁命令"
+    print("✅ 未解锁时 close 不误发上锁 OK")
+
+
 def main():
     tests = [
         test_clamp_horizontal,
@@ -163,6 +198,8 @@ def main():
         test_send_applies_clamp,
         test_neutral_on_close,
         test_interrupt_path_sends_neutral,
+        test_close_disarms_when_armed,
+        test_close_no_disarm_when_not_armed,
     ]
     failed = 0
     for t in tests:

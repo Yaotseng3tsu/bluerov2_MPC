@@ -41,8 +41,13 @@ from src.plant import DepthParams, DepthPlant  # noqa: E402
 MAV_TYPE_SUBMARINE = 12
 MAV_AUTOPILOT_ARDUPILOTMEGA = 3
 MAV_MODE_FLAG_CUSTOM_MODE_ENABLED = 1
+MAV_MODE_FLAG_SAFETY_ARMED = 128
 MAV_STATE_STANDBY = 3
+MAV_STATE_ACTIVE = 4
 MANUAL_MODE = 19
+MAV_CMD_COMPONENT_ARM_DISARM = 400
+MAV_CMD_DO_SET_MODE = 176
+MAV_RESULT_ACCEPTED = 0
 
 
 def z_to_u(z_channel: int) -> float:
@@ -103,9 +108,21 @@ def main() -> int:
     print(f"[sitl] plant: eff_mass={params.eff_mass} c_lin={params.c_lin} "
           f"c_quad={params.c_quad} K={params.K_thrust_N}N net_buoy={params.net_buoy_N}N")
 
+    state = {"armed": False, "mode": MANUAL_MODE}
+
     def send_heartbeat():
+        base = MAV_MODE_FLAG_CUSTOM_MODE_ENABLED
+        if state["armed"]:
+            base |= MAV_MODE_FLAG_SAFETY_ARMED
+        st = MAV_STATE_ACTIVE if state["armed"] else MAV_STATE_STANDBY
         mav.heartbeat_send(MAV_TYPE_SUBMARINE, MAV_AUTOPILOT_ARDUPILOTMEGA,
-                           MAV_MODE_FLAG_CUSTOM_MODE_ENABLED, MANUAL_MODE, MAV_STATE_STANDBY)
+                           base, state["mode"], st)
+
+    def send_ack(cmd, result=MAV_RESULT_ACCEPTED):
+        try:
+            mav.command_ack_send(cmd, result)
+        except Exception:
+            pass
 
     sim_hz = 50.0
     dt = 1.0 / sim_hz
@@ -137,9 +154,23 @@ def main() -> int:
             except Exception:
                 msgs = []
             for m in msgs:
-                if m.get_type() == "MANUAL_CONTROL":
+                t = m.get_type()
+                if t == "MANUAL_CONTROL":
                     u = z_to_u(m.z)
                     last_cmd_t = now
+                elif t == "COMMAND_LONG" and m.command == MAV_CMD_COMPONENT_ARM_DISARM:
+                    state["armed"] = (m.param1 >= 0.5)
+                    forced = " (force)" if abs(m.param2 - 21196) < 1 else ""
+                    print(f"[sitl] {'ARM' if state['armed'] else 'DISARM'} 指令{forced} → ACK")
+                    send_ack(MAV_CMD_COMPONENT_ARM_DISARM)
+                    send_heartbeat()
+                elif t == "COMMAND_LONG" and m.command == MAV_CMD_DO_SET_MODE:
+                    state["mode"] = int(m.param2) if m.param2 else MANUAL_MODE
+                    send_ack(MAV_CMD_DO_SET_MODE)
+                    send_heartbeat()
+                elif t == "SET_MODE":
+                    state["mode"] = m.custom_mode
+                    send_heartbeat()
 
         # --- 积分动力学 ---
         if args.demo:
@@ -148,7 +179,9 @@ def main() -> int:
         else:
             if now - last_cmd_t > args.cmd_timeout:
                 u = 0.0  # 仿真 failsafe
-            plant.step(u, dt)
+            # 真机行为:未 arm 时推进器不转
+            u_eff = u if state["armed"] else 0.0
+            plant.step(u_eff, dt)
             depth = plant.z
 
         # --- 遥测 ---
@@ -165,7 +198,9 @@ def main() -> int:
                                          0, rel_alt_mm, 0, 0, 0, 0)
         if now - last_log >= 0.5:
             last_log = now
-            print(f"[sitl] t={el:5.1f}s  u={u:+.2f}  depth={depth:+.3f}m  w={plant.w:+.3f}m/s")
+            a = "ARMED" if (not args.demo and state["armed"]) else ("DEMO" if args.demo else "DISARM")
+            u_show = (u if state["armed"] else 0.0) if not args.demo else 0.0
+            print(f"[sitl] t={el:5.1f}s  {a}  u={u_show:+.2f}  depth={depth:+.3f}m  w={plant.w:+.3f}m/s")
 
         time.sleep(dt)
 
