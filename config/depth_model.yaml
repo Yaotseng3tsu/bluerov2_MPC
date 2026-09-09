@@ -19,7 +19,7 @@ sim_truth:
   net_buoy_N: -2.0      # N   (略正浮,下潜为正系下为负)
   u_max: 1.0
 
-identified:             # <-- P3 系统辨识后回填
+identified:             # <-- P3 系统辨识后回填 (src/sysid_fit.py --write)
   eff_mass: null
   c_lin: null
   c_quad: null

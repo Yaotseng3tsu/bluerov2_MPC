@@ -237,5 +237,7 @@ mpc:      { dt: 0.1, N: 20, Q_pos: 10.0, Q_vel: 1.0, R: 0.1, R_du: 0.5, u_limit:
 
 - **P5** MPC 定深 `src/mpc.py`(CasADi NMPC:输入硬约束 + offset-free 扰动观测 + 延迟补偿),与 PID 基线对比见 [`docs/RESULTS_P5.md`](docs/RESULTS_P5.md)。结论:1 维定深两者相当(PID 更省力、MPC 超调略小、都 offset-free);MPC 的约束/多 DOF/预测优势待真机+约束场景激发。
 
-**待真机复核**:P0/P1 联机、z 中位与符号、ArduSub 失联行为、深度噪声 σ 标定与到达率、PID/MPC 参数重调。
-**后续阶段**:P3 系统辨识(需真机数据)→ 用真实模型重评估 MPC;P6 扩展(多 DOF / yaw / RL)。
+- **P3** 系统辨识框架 `src/sysid_collect.py`+`src/sysid_fit.py`(仿真误差最小化,SITL 验证深度回放 R²=0.998),见 [`docs/RESULTS_P3.md`](docs/RESULTS_P3.md);`identified` 段待真机入水数据回填。
+
+**待真机复核**:P0/P1 联机、z 中位与符号、ArduSub 失联行为、深度噪声 σ 标定与到达率、PID/MPC 参数重调、P3 入水采集回填 `identified`。
+**后续阶段**:真机 P3 辨识 → 用真实模型重评估 PID/MPC;P6 扩展(多 DOF / yaw / RL)。

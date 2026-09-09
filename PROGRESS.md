@@ -127,4 +127,14 @@
 - 最终对比(SITL 噪声0.02m,同噪声实现):阶跃超调 PID11.9% vs MPC10.6%;稳态RMSE 0.037 vs 0.040;控制能量 1.04 vs 1.40(PID更省);抗扰峰值偏移 0.13 vs 0.21m,稳态误差 1.6 vs 2.8cm(两者都offset-free);|u|≤0.3 MPC为优化内硬约束。
 - 诚实结论:**1维SISO定深调好的PID很强,MPC难显著拉开(公认结论,非实现问题)**。MPC价值在硬约束/多DOF/参考预测,本工况未激发。保留基础设施,待真机P3辨识+约束场景重评估(与用户约定真机后调)。
 - 调参历程记录:初版MPC含噪反差(超调14%、能量1.6)→ 定位为①扰动观测器×KF滞后致极限环 ②KF速度滞后+传输延迟致刹车晚;→ 加offset-free观测器(可配增益)+延迟补偿,权重Q_vel=3/R_du=1;最终与PID相当。
-- git commit: (P5 提交)
+- git commit: 7302aeb (已推送)
+
+### [Phase 3] 系统辨识框架(SITL 验证,待真机)— 2026-09-10
+- 目标:先写好开环采集+拟合框架,真机入水采数据后回填 identified,给 MPC 用真实模型。
+- 交付:`src/sysid_collect.py`(开环阶跃采集,复用解锁/安全)、`src/sysid_fit.py`(仿真误差最小化拟合 scipy least_squares + 回放验证图 + --write 回填)、`docs/RESULTS_P3.md`。
+- 关键设计:只有比值可辨识→拟合 b_u/b0/a_lin/a_quad,固定 eff_mass 反算;**用仿真误差(只用深度、不微分)避免噪声放大**(初版对速度微分做线性回归 R²=0.44 很差 → 改仿真误差 R²=0.998)。
+- SITL 验证(已知真值):深度回放 R²=0.998、RMSE 3cm;net_buoy 反算 -1.78(真值-2),b_u 2.61(真值3.08,数据有限偏低);流水线 采集→拟合→回放→--write→MPC自动切identified 端到端跑通。
+- 修 bug:--write 正则误匹配注释里的 "identified:" → 污染 sim_truth;改行级定位真正段起始。
+- 依赖:新增 scipy(requirements 已列)。identified 段仓库保持 null(真机回填)。
+- 待真机:入水采集真实阶跃;可能需更丰富激励/标称 eff_mass/改进阻尼拆分。
+- git commit: (P3 提交)
