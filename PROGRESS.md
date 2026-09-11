@@ -153,8 +153,10 @@
 - 读数:`FS_PILOT_INPUT=2`(失联→disarm)、`FS_PILOT_TIMEOUT=3`s、`FS_GCS_ENABLE=2`(GCS 失联→disarm)、`FS_LEAK_ENABLE=1`、`FS_LEAK_ACTION`=未获取、`FS_CRASH_CHECK=0`、`FS_EKF_ACTION=0`、`BATT_LOW_VOLT=12`。
 - 结论:**硬崩溃兜底充分** —— 进程崩溃/断网时 ArduSub 约 3s 内因 pilot input 或 GCS 心跳丢失自动 disarm;加上代码正常退出/Ctrl+C 主动上锁 = 双保险。可继续。
 
-### 步骤② P0 link --check —（进行中,待填)
-- 深度源=____ 实测 Hz=____ arm 状态=____(干测深度不变属正常)。
+### 步骤② P0 link --check — ✅ 完成
+- heartbeat OK,arm=DISARMED,模式=MANUAL,autopilot=3/type=12。
+- 深度源=**GLOBAL_POSITION_INT**,实测 **11.0 Hz**;heartbeat 3.0 Hz。
+- 深度静态噪声 ≈ **±5mm**(跨度 0.026m,干测无变化属正常),比仿真假设(20mm)更干净。
 
 ### 步骤③ 未解锁不动 —（待填)
 ### 步骤④ calibrate 方向/中位标定 —（待填)
