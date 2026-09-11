@@ -63,14 +63,30 @@ class PseudoStick:
         self.armed_by_us = False  # 只对"本进程解锁的"负责自动上锁
 
     def wait_heartbeat(self, timeout_s: float = 10.0) -> bool:
-        print(f"[stick] 等待 heartbeat ({self.endpoint}) ...")
-        hb = self.conn.wait_heartbeat(timeout=timeout_s)
+        """只锁定真正的飞控心跳(autopilot≠INVALID 且非 GCS),把 target 固定到飞控。
+
+        网络上除飞控外还有 BlueOS/路由器/GCS 的心跳(常为 system 0 或 GCS 类型);
+        若锁错 system,MANUAL_CONTROL 会被 ArduSub 忽略 → 电机不转。
+        """
+        m = self.mavutil.mavlink
+        print(f"[stick] 等待飞控 heartbeat ({self.endpoint}) ...")
+        t_end = time.monotonic() + timeout_s
+        hb = None
+        while time.monotonic() < t_end:
+            msg = self.conn.recv_match(type="HEARTBEAT", blocking=True, timeout=1.0)
+            if msg is None:
+                continue
+            if msg.autopilot != m.MAV_AUTOPILOT_INVALID and msg.type != m.MAV_TYPE_GCS:
+                hb = msg
+                self.conn.target_system = msg.get_srcSystem()
+                self.conn.target_component = msg.get_srcComponent()
+                break
         if hb is None:
-            print("[stick] ❌ 未收到 heartbeat")
+            print("[stick] ❌ 未收到飞控 heartbeat(只收到 GCS/路由器心跳?)")
             return False
         armed = bool(hb.base_mode & MAV_MODE_FLAG_SAFETY_ARMED)
         print(f"[stick] heartbeat OK  system={self.conn.target_system} "
-              f"arm={'ARMED' if armed else 'DISARMED'}")
+              f"comp={self.conn.target_component} arm={'ARMED' if armed else 'DISARMED'}")
         return True
 
     def _norm_to_ch(self, u: float, axis: str) -> int:
