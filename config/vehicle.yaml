@@ -22,12 +22,12 @@ safety:
   DEPTH_MAX: 3.0                    # m, 设为 池深-0.5 左右
   allow_arm: false                  # 是否允许脚本自动解锁 (默认否,需显式确认)
 
-manual_control:                     # <-- Phase 1 实测后回填
-  z_neutral: 500                    # TODO: z 中位整型值 (电机停转)
-  sign_x: 1                         # TODO: +x 是否对应前进
-  sign_y: 1                         # TODO
-  sign_z: 1                          # TODO: +z 是否对应下潜(与深度正方向一致)
-  sign_r: 1                         # TODO
+manual_control:                     # <-- Phase 1 干测验证 (2026-09-11)
+  z_neutral: 500                    # 已验证:中位→SERVO 1500
+  sign_x: 1                         # 轴映射已验证(标准 Heavy);绝对方向待下水确认
+  sign_y: 1                         # 轴映射已验证
+  sign_z: 1                         # 待下水用深度验证(z+ 应=下潜/深度增大,反则改 -1)
+  sign_r: 1                         # 轴映射已验证
 
 depth_model:                        # <-- Phase 3 辨识后回填 (二阶模型)
   m_eff: null                       # TODO: 有效质量(含附加质量)
