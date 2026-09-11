@@ -66,6 +66,8 @@ def main(argv=None) -> int:
     p.add_argument("--axes", default="xyzr", help="要标定的轴,如 z 或 xyzr")
     p.add_argument("--pulse", type=float, default=0.2, help="脉冲归一化幅值")
     p.add_argument("--dur", type=float, default=0.8, help="脉冲时长 (s)")
+    p.add_argument("--umax", type=float, default=None,
+                   help="临时覆盖 U_MAX(干测顶过 ESC 死区,如 0.6)")
     p.add_argument("--force-arm", action="store_true")
     p.add_argument("--yes", action="store_true", help="跳过解锁确认(慎用)")
     args = p.parse_args(argv)
@@ -73,6 +75,9 @@ def main(argv=None) -> int:
     cfg = load_config()
     hz = float(cfg.get("control", {}).get("CTRL_HZ", 10))
     stick = PseudoStick(cfg, endpoint=args.endpoint)
+    if args.umax is not None:
+        stick.u_max = args.umax
+        print(f"[calibrate] 临时 U_MAX = {args.umax}")
     signs: dict[str, int] = {}
     try:
         if not stick.wait_heartbeat(float(cfg["connection"].get("heartbeat_timeout_s", 10))):
