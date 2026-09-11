@@ -137,4 +137,27 @@
 - 修 bug:--write 正则误匹配注释里的 "identified:" → 污染 sim_truth;改行级定位真正段起始。
 - 依赖:新增 scipy(requirements 已列)。identified 段仓库保持 null(真机回填)。
 - 待真机:入水采集真实阶跃;可能需更丰富激励/标称 eff_mass/改进阻尼拆分。
-- git commit: (P3 提交)
+- git commit: 92f75b3 (已推送)
+
+---
+
+## 真机实测 Day 1 — 2026-09-11(出水台架干测,目标 P0→P1)
+
+### 环境 / 连接
+- BlueROV2 R4 实机,**全程干测不下水**。
+- 上位机 IP = **192.168.2.188**(以太网,BlueROV 网段);ping 192.168.2.2(飞控)通。
+- 连接方式:BlueOS(Pirate Mode → MAVLink Endpoints)新建 **UDP Client → 192.168.2.188:14550**;上位机脚本用 `udpin:0.0.0.0:14550`。
+- 坑:① 初次无 heartbeat = BlueOS 未配指向本机的端点;加 UDP Client 端点后解决。② Norton 防火墙需临时关闭/放行 python 收 UDP 14550。
+
+### 步骤① check_params(只读 failsafe)— ✅ 完成
+- 读数:`FS_PILOT_INPUT=2`(失联→disarm)、`FS_PILOT_TIMEOUT=3`s、`FS_GCS_ENABLE=2`(GCS 失联→disarm)、`FS_LEAK_ENABLE=1`、`FS_LEAK_ACTION`=未获取、`FS_CRASH_CHECK=0`、`FS_EKF_ACTION=0`、`BATT_LOW_VOLT=12`。
+- 结论:**硬崩溃兜底充分** —— 进程崩溃/断网时 ArduSub 约 3s 内因 pilot input 或 GCS 心跳丢失自动 disarm;加上代码正常退出/Ctrl+C 主动上锁 = 双保险。可继续。
+
+### 步骤② P0 link --check —（进行中,待填)
+- 深度源=____ 实测 Hz=____ arm 状态=____(干测深度不变属正常)。
+
+### 步骤③ 未解锁不动 —（待填)
+### 步骤④ calibrate 方向/中位标定 —（待填)
+- sign_x=__ sign_y=__ sign_z=__ sign_r=__ z_neutral=__(干测靠看 T200 转向/气流判断)。
+### 步骤⑤ 代码点动推进器(最低目标)—（待填)
+### 今日未做（需下水):深度符号验证、P3 采集、P4/P5 闭环。
