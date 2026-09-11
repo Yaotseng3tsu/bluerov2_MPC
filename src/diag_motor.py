@@ -39,6 +39,8 @@ def main(argv=None) -> int:
     p.add_argument("--yes", action="store_true")
     p.add_argument("--umax", type=float, default=None,
                    help="临时覆盖 U_MAX 限幅(干测顶过 ESC 死区用,如 0.6)")
+    p.add_argument("--scan", action="store_true",
+                   help="一键依次扫 x/y/z/r,打印每轴 SERVO 增量表")
     args = p.parse_args(argv)
 
     cfg = load_config()
@@ -62,6 +64,31 @@ def main(argv=None) -> int:
         if not stick.arm(force=args.force_arm):
             return 2
         stick.start_keepalive(hz)
+
+        # ---- 扫描模式:依次 x/y/z/r,记录每轴稳定 SERVO ----
+        if args.scan:
+            def read_servo(dur):
+                last = None
+                t_end = time.monotonic() + dur
+                while time.monotonic() < t_end:
+                    m = conn.recv_match(type="SERVO_OUTPUT_RAW", blocking=True, timeout=0.5)
+                    if m is not None:
+                        last = [getattr(m, f"servo{i}_raw") for i in range(1, 9)]
+                return last
+            stick.set_cmd(); read_servo(1.0)  # 中位基线
+            table = {}
+            for ax in "xyzr":
+                stick.set_cmd(**{ax: args.u})
+                s = read_servo(1.8)
+                stick.set_cmd(); read_servo(1.0)
+                table[ax] = s
+                print(f"  {ax}=+{args.u}: SERVO {s}")
+            print("\n=== 每轴 SERVO 相对 1500 的增量(通道1-8)===")
+            for ax in "xyzr":
+                d = [(v - 1500) if v is not None else None for v in table[ax]]
+                print(f"  {ax}: {d}")
+            return 0
+
         stick.set_cmd(**{args.axis: args.u})
         print(f"\n持续发 {args.axis}={args.u},观察 {args.seconds}s ...\n")
 
