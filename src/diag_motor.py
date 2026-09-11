@@ -60,21 +60,30 @@ def main(argv=None) -> int:
         stick.set_cmd(**{args.axis: args.u})
         print(f"\n持续发 {args.axis}={args.u},观察 {args.seconds}s ...\n")
 
+        hb_sources = {}
         t_end = time.monotonic() + args.seconds
         while time.monotonic() < t_end:
             m = conn.recv_match(blocking=True, timeout=0.5)
             if m is None:
                 continue
             t = m.get_type()
-            if t == "HEARTBEAT" and m.get_srcSystem() == conn.target_system:
-                armed = bool(m.base_mode & 128)
-                print(f"  HB   armed={armed}  mode={MODE.get(m.custom_mode, m.custom_mode)}")
+            if t == "HEARTBEAT":
+                key = (m.get_srcSystem(), m.get_srcComponent())
+                hb_sources.setdefault(key, {"ap": m.autopilot, "type": m.type})
+                if m.get_srcSystem() == conn.target_system:
+                    armed = bool(m.base_mode & 128)
+                    print(f"  HB sys{m.get_srcSystem()}/comp{m.get_srcComponent()} "
+                          f"armed={armed} mode={MODE.get(m.custom_mode, m.custom_mode)}")
             elif t == "SERVO_OUTPUT_RAW":
                 s = [getattr(m, f"servo{i}_raw") for i in range(1, 9)]
                 print(f"  SERVO {s}")
             elif t == "STATUSTEXT":
                 txt = m.text.decode() if isinstance(m.text, bytes) else m.text
                 print(f"  >>> STATUSTEXT: {txt}")
+        print("\n=== 心跳源汇总(autopilot=3 是飞控;其它=GCS/路由/扩展)===")
+        for (s, c), info in sorted(hb_sources.items()):
+            tag = "← 飞控" if info["ap"] == 3 else "← 非飞控(可能在抢控制)"
+            print(f"  sys{s}/comp{c}  autopilot={info['ap']} type={info['type']}  {tag}")
         return 0
     finally:
         stick.close()
