@@ -110,6 +110,39 @@ class PseudoStick:
     def send_neutral(self) -> None:
         self.send(0.0, 0.0, 0.0, 0.0)
 
+    # -------- keepalive:后台持续发指令+心跳,避免 input() 阻塞期间失联失效 --------
+    def start_keepalive(self, hz: float = 10.0) -> None:
+        import threading
+        self._ka_cmd = [0.0, 0.0, 0.0, 0.0]
+        self._ka_run = True
+        self._ka_hz = hz
+        self._ka_thread = threading.Thread(target=self._ka_loop, daemon=True)
+        self._ka_thread.start()
+
+    def _ka_loop(self) -> None:
+        period = 1.0 / self._ka_hz
+        i = 0
+        while getattr(self, "_ka_run", False):
+            c = self._ka_cmd
+            try:
+                self.send(x=c[0], y=c[1], z=c[2], r=c[3])
+                if i % max(1, int(self._ka_hz)) == 0:
+                    self.send_gcs_heartbeat()
+            except Exception:
+                pass
+            i += 1
+            time.sleep(period)
+
+    def set_cmd(self, x=0.0, y=0.0, z=0.0, r=0.0) -> None:
+        """设置 keepalive 线程持续发送的指令值。"""
+        self._ka_cmd = [x, y, z, r]
+
+    def stop_keepalive(self) -> None:
+        self._ka_run = False
+        th = getattr(self, "_ka_thread", None)
+        if th is not None:
+            th.join(timeout=1.0)
+
     # ---------------- 解锁 / 模式 (真机需要) ----------------
     def send_gcs_heartbeat(self) -> None:
         """以 GCS 身份发心跳,避免 ArduSub 的 GCS 失联失效。"""
@@ -195,6 +228,7 @@ class PseudoStick:
             time.sleep(dt)
 
     def close(self) -> None:
+        self.stop_keepalive()
         # 退出保护:先回中位,若本进程解锁过则自动上锁 (多次 fire-and-forget,不依赖收包)
         try:
             for _ in range(5):

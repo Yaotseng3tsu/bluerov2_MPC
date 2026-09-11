@@ -85,6 +85,8 @@ def main(argv=None) -> int:
         time.sleep(0.3)
         if not stick.arm(force=args.force_arm):
             return 2
+        # 后台持续发中位+心跳,保证等你按回车/观察时飞控不因失联 disarm
+        stick.start_keepalive(hz)
 
         for axis in args.axes:
             if axis not in AXIS_DESC:
@@ -94,9 +96,9 @@ def main(argv=None) -> int:
             if ans == "s":
                 print("  跳过。")
                 continue
-            kw = {axis: args.pulse}
-            stick.hold(seconds=args.dur, hz=hz, **kw)
-            stick.send_neutral()
+            stick.set_cmd(**{axis: args.pulse})   # keepalive 线程持续发脉冲
+            time.sleep(args.dur)
+            stick.set_cmd()                        # 回中位
             obs = ask("  观察到的运动方向与【期望正方向】一致吗? y=一致 / n=反了 / s=跳过: ")
             if obs == "y":
                 signs[axis] = 1
