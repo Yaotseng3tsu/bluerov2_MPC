@@ -37,11 +37,16 @@ def main(argv=None) -> int:
     p.add_argument("--seconds", type=float, default=4.0)
     p.add_argument("--force-arm", action="store_true")
     p.add_argument("--yes", action="store_true")
+    p.add_argument("--umax", type=float, default=None,
+                   help="临时覆盖 U_MAX 限幅(干测顶过 ESC 死区用,如 0.6)")
     args = p.parse_args(argv)
 
     cfg = load_config()
     hz = float(cfg.get("control", {}).get("CTRL_HZ", 10))
     stick = PseudoStick(cfg)
+    if args.umax is not None:
+        stick.u_max = args.umax
+        print(f"[diag] 临时 U_MAX = {args.umax}")
     conn = stick.conn
     try:
         if not stick.wait_heartbeat(10):
