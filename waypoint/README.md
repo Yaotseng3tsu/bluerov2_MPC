@@ -73,13 +73,13 @@
 |---|---|---|---|
 | `README.md` | 本文档 | — | ✅ |
 | `dvl_stream.py` | DVL 速度读取器（线程安全 latest/is_fresh/超龄） | W1 | ✅ |
-| `config/surge_model.yaml` | surge 二阶模型（`sim_truth`+`identified`；预留 sway 段） | W2 | ⏳ |
-| `surge_sysid_collect.py` / `surge_sysid_fit.py` | 发 x 阶跃、DVL 记 vx → 拟合回填 | W2 | ⏳ |
-| `motion_model.py` | surge 1D 动力学 + 梯形速度轨迹（给距离→前馈 u_x(t)） | **W3** | ⏳ |
-| `heading_hold.py` | ATTITUDE.yaw 航向 P/PD 控制 → r 修正 | W4 | ⏳ |
-| `go_waypoint.py` | **主脚本**：4DOF 状态机 + 世界系航位推算 + 安全降级 | W5 | ⏳ |
-| `sim/fake_dvl.py` + 扩展 `tests/sim_vehicle.py` | 离线仿真件（假 DVL + surge/yaw SITL） | 仿真 | ⏳ |
-| `RESULTS.md` | 干测/水下记录与复盘 | W6 | ⏳ |
+| `config/surge_model.yaml` | surge 二阶模型（`sim_truth`+`identified`；预留 sway 段） | W2 | ✅ (identified 待真机) |
+| `surge_sysid_collect.py` / `surge_sysid_fit.py` | 发 x 阶跃、DVL 记 vx → 拟合回填 | W2 | ✅ 代码 (待采集) |
+| `motion_model.py` | surge 1D 动力学 + 梯形速度轨迹（给距离→前馈 u_x(t)） | W3 | ✅ |
+| `heading_hold.py` | ATTITUDE.yaw 航向 P/PD 控制 → r 修正 | W4 | ✅ |
+| `go_waypoint.py` | **主脚本**：4DOF 状态机 + 世界系航位推算 + 安全降级 | W5 | ✅ (SITL) |
+| `sim/fake_dvl.py` + `sim/sim_waypoint.py` | 离线仿真件（假 DVL + 4DOF SITL） | 仿真 | ✅ |
+| `RESULTS.md` | 干测/水下记录与复盘 | W6 | ⏳ 待连机 |
 
 深度沿用主项目 [`src/depth_control.py`](../src/depth_control.py)+[`src/plant.py`](../src/plant.py)，不新建。
 
