@@ -178,3 +178,27 @@
 - 必须锁定飞控心跳 **sys1/comp1(autopilot=3)**;网络上还有 BlueOS 板载服务 comp191/194(autopilot=8,心跳 mode/armed 字段是无意义填充,勿当真)。
 - 解锁后若在 input() 阻塞,FS_PILOT_INPUT(3s)会 disarm → 需 keepalive 线程持续发指令+心跳。
 ### 今日未做(需下水):深度符号验证、P3 采集辨识、P4/P5 闭环、pilot gain 调整。
+
+---
+
+## Phase W — 伪手柄 A→B 点到点前进(DVL 航位推算) [2026-09-16 立项]
+新增子模块 `waypoint/`,目标:无外部绝对定位下,伪手柄让 BlueROV2 前进指定距离(例 3m)后停。
+方案 = **surge 动力学模型算前馈指令** + **DVL 速度航位推算(∫vx·dt)判到距停** + **IMU/ATTITUDE 航向保持走直线**。复用主项目 `pseudo_stick`/`plant`/`sysid` 范式与安全约定。
+
+### 数据结论(为何要补辨识)
+- 深度模型只标定 heave,水平轴分配/附加质量/阻尼不同,不能挪用。
+- `rl_logger` 拖曳 IMU 24 组是被动拖曳(无遥杆指令通道),只含姿态/起停/方向可分性,无"指令→运动"映射。
+- ⇒ 必须先补一小段 **surge 系统辨识**(W2);有 DVL 速度反馈后成本很低。
+
+### 决策(2026-09-16)
+- 定位策略:**DVL 航位推算**(用户选;比纯开环鲁棒,仍无绝对位置真值)。
+- 新文件夹:`C:\bluerov2_mpc\waypoint\`(子模块,复用主项目脚手架)。
+- W2 辨识档位**顶过 ESC 死区**:`u_x=0.35/0.45/0.55`(前后各点动),采集须 `--umax 0.6` 覆盖 U_MAX=0.3。
+- W1 **保留 BlueOS DVL 扩展**(不停用):优先直连 16171 只读,占用则退回 MAVLink 读扩展转发速度。
+
+### 步骤规划(每步先经用户确认再推进)
+- W1 DVL 接入自检(dvl_stream.py) / W2 surge 系统辨识(surge_sysid_collect+fit → surge_model.yaml)
+- W3 surge_plant + 前馈梯形速度轨迹 / W4 heading_hold(ATTITUDE.yaw,P) / W5 go_distance.py 主脚本 / W6 干测→水下→复盘
+
+### 当前状态
+- ✅ 已建 `waypoint/` 与 `waypoint/README.md`(含架构图/文件规划/分步计划/安全)。下一步待确认后进 W1。
