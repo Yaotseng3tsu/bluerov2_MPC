@@ -1,56 +1,67 @@
-# Waypoint — 伪手柄 A→B 点到点前进（DVL 航位推算）
+# Waypoint — 相对航点定向航行 (Point-and-go 4DOF)
 
-> 目标：在**无外部绝对定位**（无 A/B 真值坐标）的前提下，用伪手柄让 BlueROV2
-> 从 A 点前进指定距离（例：**前进 3 m**）后停下。
-> 方案 = **surge 动力学模型算前馈指令** + **DVL 速度航位推算 (∫vx·dt) 判断已走距离** +
-> **IMU/ATTITUDE 航向保持走直线**。
+> 目标：在**无外部绝对定位**下，用伪手柄让 BlueROV2 执行一次相对航点移动：
+> **转到目标航向 → 前进指定距离 → 调到目标深度**，全程保持航向与深度。
+> 例：`go_waypoint --heading 90 --dist 3 --depth 1.5`（朝正东走 3m、深度 1.5m）。
+>
+> 方案 = **surge 动力学前馈** + **DVL 速度航位推算 (∫v·dt) 判到距** +
+> **IMU/ATTITUDE 航向保持** + **绝对深度闭环**（复用主项目深度模型）。
 
-本文件夹是 `C:\bluerov2_mpc` 主项目的一个子模块，直接复用主项目的
-[`src/pseudo_stick.py`](../src/pseudo_stick.py)、`plant`/`sysid` 范式、`config/` 与安全约定。
-
----
-
-## 0. 为什么需要先补数据（现状结论）
-
-现有数据**不足以**直接做前进方向的动力学映射，原因：
-
-- **深度模型不能挪用**：[`config/depth_model.yaml`](../config/depth_model.yaml) 只标定了 heave（垂直轴）。
-  水平推进器分配矩阵、附加质量、阻尼与垂直轴完全不同；且真机 `identified` 段仍为 `null`。
-- **拖曳 IMU 数据没有指令通道**：`bluerov2_rl_logger` 的 24 组拖曳实验是**被动拖曳**
-  （轨道拖着走、遥杆未记录），只含姿态/起停瞬态/方向可分性，**没有"推力指令→运动"映射**。
-  报告结论明确："匀速平移在 IMU 上不可见，绝对位移需 DVL/声纳"；"磁力计不可用于航向"。
-
-因此本模块必须先做一小段 **surge 系统辨识**（W2）。有了 DVL 速度反馈，这一步很便宜。
+本文件夹是 `C:\bluerov2_mpc` 主项目子模块，复用
+[`src/pseudo_stick.py`](../src/pseudo_stick.py)、[`src/plant.py`](../src/plant.py)、
+[`src/depth_control.py`](../src/depth_control.py)、`sysid` 范式与安全约定。
 
 ---
 
-## 1. 坐标与约定
+## 0. 能控自由度与数据现状（重要）
 
-- **surge**：机体前向为 +X；前进指令 `u_x ∈ [-1, 1]`（复用 `manual_control.sign_x`）。
-- **DVL 速度**：`vx` 为机体前向速度（m/s）。W1 需实测确认 `vx` 前进为正，否则记录符号翻转。
-- **航向**：用 ArduSub 融合的 `ATTITUDE.yaw`（或陀螺积分）做直线保持；**不用磁力计**（不可靠）。
-- **距离判据**：`s(t) = ∫ vx dt`，`s ≥ target` 即停（非绝对位置，是速度积分的相对位移）。
+**BlueROV2(Heavy)只独立驱动 4 个自由度**：`surge(x) / sway(y) / heave(z) / yaw(r)`。
+**roll、pitch 无独立执行机构**，靠重浮心分离被动稳定 → 本模块只**监测**其角度（超限报警），
+不作为航行目标。所谓"6 自由度定向航行"这台机器物理上做不到；4DOF 相对航点已覆盖实用需求。
 
-> 说明："无反馈"在本方案里指**无绝对位置反馈**；DVL 速度积分与 yaw 保持属于内环，
-> 是让开环前馈能真正走到 3m 的必要鲁棒手段。若你要的是**字面零反馈**（发指令即停、
-> 全程不看传感器），见文末「附：纯开环变体」。
+| 自由度 | 目标量 | 闭环来源 | 数据现状 |
+|---|---|---|---|
+| surge x | 前进距离 | DVL `vx` 航位推算 | 需 W2 辨识 |
+| sway y | 侧移距离 | DVL `vy` 航位推算 | **本期预留接口**，暂不辨识 |
+| heave z | 目标深度 | **绝对深度** GLOBAL_POSITION_INT | ✅ 已有模型+KF，真闭环最准 |
+| yaw r | 目标航向 | IMU/ATTITUDE `yaw` | ✅ 现成（不用磁力计） |
+
+**为何要补 surge 辨识**：深度模型只标定 heave（水平轴分配/附加质量/阻尼全不同，不能挪用）；
+`rl_logger` 拖曳 IMU 24 组是被动拖曳、无遥杆指令通道，只含姿态/起停/方向可分性，无"指令→运动"映射。
+⇒ 必须补一小段 surge 辨识（W2）；有 DVL 速度反馈后成本很低。
+
+---
+
+## 1. 范式与坐标约定
+
+- **范式：Point-and-go 4DOF**（本期）——分解为①调深度 ②转航向 ③沿航向前进到距离。
+  非全向：不同时用 sway 斜move。**sway 接口预留**，后续可升级为 holonomic 全向。
+- **surge**：机体前向 +X，指令 `u_x∈[-1,1]`（复用 `manual_control.sign_x`）。
+- **DVL 速度**：`vx/vy` 为机体系速度；W1 连机确认 `vx` 前进符号。
+- **坐标系**：航位推算在**世界系**做——用 `yaw` 把机体系 DVL 速度旋到世界系再积分
+  （`go_waypoint` 里 `[vN;vE] = R(yaw)·[vx;vy]`），这样航向变化不污染距离。
+- **航向**：ArduSub 融合 `ATTITUDE.yaw`，**不用磁力计**（不可靠）。
+- **深度**：绝对深度闭环（向下为正），复用主项目 depth 模型/PID。
+- **距离判据**：沿目标航向的位移 `s=∫v_along·dt ≥ dist` 即停（相对位移，非绝对位置真值）。
 
 ---
 
 ## 2. 目标架构
 
 ```
-   目标距离 s* (3m)
+ 航点(heading*, dist, depth*)
         │
         ▼
- ┌──────────────┐  前馈指令 profile   ┌───────────────┐  MANUAL_CONTROL(x,r)  ┌──────────┐
- │ 轨迹/前馈生成 │ ─── u_x(t) ──────▶ │  pseudo_stick  │ ────────────────────▶ │ BlueROV2 │
- │ (surge 模型) │                    │  (发指令+安全)  │                       └────┬─────┘
- └──────────────┘                    └───────┬────────┘                            │
-        ▲                                    │ r = 航向P修正                        │
-        │ s(t)=∫vx dt                        │                                     │
- ┌──────┴───────┐   vx (DVL)   ◀─────────────┴──── ATTITUDE.yaw (MAVLink) ◀────────┘
- │ 航位推算+停止 │
+ ┌──────────────┐
+ │  go_waypoint │  ①depth闭环  ②yaw转向  ③surge前馈+航位推算   ← 顺序/可叠加
+ │  (状态机)     │
+ └──┬───┬───┬───┘
+    │   │   └── surge: motion_model 前馈 u_x  ─┐
+    │   └────── yaw:   heading_hold → r        ├─▶ pseudo_stick(x,z,r 安全发送)
+    │  depth: depth_control(复用) → u_z ───────┘
+    ▼
+ ┌──────────────┐  vx,vy (DVL) ─ R(yaw) ─▶ 世界系位移 s   深度(MAVLink)  yaw(ATTITUDE)
+ │ 航位推算+停止 │  底锁丢失/超龄 → 立即安全停
  └──────────────┘
 ```
 
@@ -58,81 +69,77 @@
 
 ## 3. 文件规划（随步骤逐个创建，均先经你确认）
 
-| 文件 | 作用 | 对应步骤 |
-|---|---|---|
-| `README.md` | 本文档 | ✅ 已建 |
-| `dvl_stream.py` | DVL A50 速度读取器（后台线程，提供最新 vx/vy/vz/底锁） | W1 |
-| `config/surge_model.yaml` | surge 二阶模型参数（`sim_truth` + `identified`，初始 null） | W2 |
-| `surge_sysid_collect.py` | 发 x 阶跃档、DVL 记 vx，输出 CSV | W2 |
-| `surge_sysid_fit.py` | 从 CSV 拟合 `K_x/阻尼/有效质量`，`--write` 回填 yaml | W2 |
-| `surge_plant.py` | surge 一维动力学 + 轨迹/前馈指令生成 | W3 |
-| `heading_hold.py` | 基于 ATTITUDE.yaw 的航向 P 控制（输出 r 修正） | W4 |
-| `go_distance.py` | **主脚本**：整合前馈 + DVL 航位推算 + 航向保持 + 到距停止 | W5 |
-| `RESULTS.md` | 干测/水下实测记录与复盘 | W6 |
+| 文件 | 作用 | 步骤 | 状态 |
+|---|---|---|---|
+| `README.md` | 本文档 | — | ✅ |
+| `dvl_stream.py` | DVL 速度读取器（线程安全 latest/is_fresh/超龄） | W1 | ✅ |
+| `config/surge_model.yaml` | surge 二阶模型（`sim_truth`+`identified`；预留 sway 段） | W2 | ⏳ |
+| `surge_sysid_collect.py` / `surge_sysid_fit.py` | 发 x 阶跃、DVL 记 vx → 拟合回填 | W2 | ⏳ |
+| `motion_model.py` | surge 1D 动力学 + 梯形速度轨迹（给距离→前馈 u_x(t)） | **W3** | ⏳ |
+| `heading_hold.py` | ATTITUDE.yaw 航向 P/PD 控制 → r 修正 | W4 | ⏳ |
+| `go_waypoint.py` | **主脚本**：4DOF 状态机 + 世界系航位推算 + 安全降级 | W5 | ⏳ |
+| `sim/fake_dvl.py` + 扩展 `tests/sim_vehicle.py` | 离线仿真件（假 DVL + surge/yaw SITL） | 仿真 | ⏳ |
+| `RESULTS.md` | 干测/水下记录与复盘 | W6 | ⏳ |
+
+深度沿用主项目 [`src/depth_control.py`](../src/depth_control.py)+[`src/plant.py`](../src/plant.py)，不新建。
 
 ---
 
-## 4. 分步骤计划（每一步执行前先征求你的意见并调整）
+## 4. 分步骤计划（离线优先；每步执行前先征求你的意见）
 
-> 规则：**每一步都先跟你确认方案/参数 → 我实现 → 你监管运行 → 记录 → 再进下一步。**
-> 任何解锁/下水前必须显式同意。进度记入主项目 `PROGRESS.md` 并 commit。
+> 规则：**每步先跟你确认方案/参数 → 我实现 → （能离线的先仿真验证）→ 记录 → 再进下一步。**
+> 连机 / 解锁 / 下水前必须显式同意。进度记入主项目 `PROGRESS.md` 并 commit。
+>
+> **离线可做**：W3 全离线；W4、W5 逻辑靠"假 DVL + surge/yaw SITL"验证。
+> **必须连机**：W1 真验证、W2 真实采集、W6 实测。
 
-### W1 — DVL 接入与自检
-- **决策**：**保留 BlueOS DVL 扩展启用**（不停用）。`dvl_stream.py` 优先直连
-  `192.168.2.95:16171` 只读（A50 JSON 服务通常允许多客户端旁路读取）；若被扩展占用/连不上，
-  则退回从 **MAVLink 读扩展转发的速度**。W1 先确定实际走哪条路。
-- **做什么**：写 `dvl_stream.py`，后台线程解析 DVL 速度（复用 `rl_logger/check_dvl.py` 的解析），
-  提供线程安全的"最新速度 + 底锁 + 数据超龄"接口。
-- **产出/判据**：能实时打印 `vx,vy,vz,valid,altitude`；确认 `vx` 前进符号；确认更新率与超龄检测。
-- **风险**：气中 `velocity_valid=false` 属正常；W1 只验证连通与坐标，绝对速度须下水验证。
+### W1 — DVL 接入自检 ✅（代码完成，连机验证待明天）
+保留 BlueOS DVL 扩展；`dvl_stream.py` 优先直连 16171 只读，占用则退回 MAVLink 读转发速度。
+明天连机确认：能否直连、更新率、`vx` 前进符号（见 `--forward-hint`）。
 
-### W2 — surge 系统辨识（补数据的关键一步）
-- **决策**：辨识档位**顶过 ESC 死区**——用 `u_x = 0.35 / 0.45 / 0.55`（各前进+后退、短促点动），
-  避开 `u≈0.3` 以下不转的死区。因 `safety.U_MAX=0.3` 会裁剪，采集脚本须显式 `--umax 0.6` 覆盖上限。
-- **做什么**：`surge_sysid_collect.py` 发上述档位同时记 DVL `vx` 到 CSV；
-  `surge_sysid_fit.py` 用仿真误差最小化拟合 `(m_eff, c_lin, c_quad, K_x)`，
-  `--write` 回填 `config/surge_model.yaml → identified`。
-- **产出/判据**：拟合 R² 合理；识别出的终速与实测阶跃终速一致。
-- **需你确认**：每档点动时长 / 水池可用直线距离（避免撞墙）；是否往返多次取平均。
-- **风险**：水池长度限制阶跃时长（终速前若已接近池壁需缩短）；下潜深度需足够避免 DVL 丢底锁。
+### W3 — 运动模型 + 前馈轨迹（**现在做，全离线**）
+- `motion_model.py`：surge 一维 RK4 动力学（照搬 `src/plant.py`）+ 梯形速度轨迹生成器
+  （加速—匀速—减速，末端零速；给定 `dist` 与 `v_cruise/a_max` → `u_x(t)` 前馈序列）。
+  轨迹生成写成 **DOF 无关**（同一梯形逻辑将来可用于 sway）。
+- **产出/判据**：离线仿真里前馈积分位移≈目标距离、末端速度≈0；出图给你看。
+- **需你确认**：巡航速度上限 `v_cruise`、加速度 `a_max`、末端减速余量。
+- **注**：辨识前先用 `surge_model.yaml` 的 `sim_truth` 占位跑通，W2 后换 `identified`。
 
-### W3 — surge 模型 + 前馈轨迹生成
-- **做什么**：`surge_plant.py`（照搬 `src/plant.py` 的 RK4，改为 surge），
-  加"给定目标距离 → 生成 `u_x(t)` 前馈 profile"（梯形速度：加速—匀速—减速，末端零速）。
-- **产出/判据**：SITL/离线仿真里前馈 profile 积分位移≈目标距离；末端速度≈0。
-- **需你确认**：巡航速度上限、加/减速档、是否要末端预留减速余量。
+### W4 — 航向保持（离线 SITL 验证）
+- `heading_hold.py`：锁定目标 `yaw`，P（必要时 PD）输出 `r`；`r` 限幅、角度 wrap 到 ±180°。
+- **产出/判据**：SITL 注入 yaw 扰动能收敛回设定航向。
+- **需你确认**：航向增益、`r` 限幅、到位容差。
 
-### W4 — 航向保持（走直线）
-- **做什么**：`heading_hold.py`，锁定起始 `yaw`，用 P（必要时 PD）输出 `r` 修正，抑制侧偏。
-- **产出/判据**：SITL/干测中给定 yaw 扰动能收敛回设定航向。
-- **需你确认**：航向增益、`r` 限幅、是否允许航向锁定漂移补偿。
+### W2 — surge 系统辨识（需连机采集；代码可离线先写）
+- 档位**顶过 ESC 死区**：`u_x=0.35/0.45/0.55`（前后各点动），采集须 `--umax 0.6` 覆盖 `U_MAX=0.3`。
+- `surge_sysid_collect.py` 发档位 + DVL 记 vx → CSV；`surge_sysid_fit.py` 仿真误差最小化拟合
+  `(m_eff,c_lin,c_quad,K_x)`，`--write` 回填 `config/surge_model.yaml → identified`。
+- **需你确认**：每档时长 / 水池可用直线距离（避免撞墙）；是否往返取平均。
+- **注**：采集/拟合代码可离线对 surge SITL 先验证；真实参数必须连机采。
 
-### W5 — 主脚本：航位推算 + 到距停止
-- **做什么**：`go_distance.py --dist 3.0` 整合：按前馈发 `u_x`，叠加 `heading_hold` 的 `r`，
-  DVL `∫vx dt` 达 `dist` 即减速停；全程复用 `pseudo_stick` 的看门狗/回中位/退出上锁。
-  DVL 超龄或底锁丢失 → 立即安全停。
-- **产出/判据**：SITL 先跑通逻辑；到距误差、末端速度、航向偏差达标。
-- **需你确认**：停止判据（纯到距 vs 到距+速度阈值）、DVL 失效时的降级策略。
+### W5 — 主脚本 go_waypoint（逻辑离线；末端精度调参需连机）
+- `go_waypoint.py --heading θ --dist d --depth z`：状态机
+  ①深度闭环到 `z`（复用 depth_control）②yaw 转到 `θ`（heading_hold）③按 motion_model 前馈发 `u_x`、
+  叠加 heading_hold 的 `r`、depth 的 `u_z`；世界系 `∫v_along·dt` 到 `d` 减速停。
+  全程复用 `pseudo_stick` 看门狗/回中位/退出上锁；DVL 超龄或丢底锁 → 立即安全停。
+  预留 `--dy/sway` 参数（本期报未实现）。
+- **产出/判据**：假 DVL+SITL 跑通整套逻辑与安全降级；到距/末速/航向/深度误差达标。
+- **需你确认**：三阶段是顺序还是深度与前进叠加、停止判据、DVL 失效降级策略。
 
 ### W6 — 干测 → 水下实测 → 复盘
-- **做什么**：先干测（不解锁/短点动验证指令与安全），再水下实测 3m，写 `RESULTS.md`。
-- **需你确认**：下水时间、现场安全、每次解锁前逐条确认。
+先干测（不解锁/短点动验证指令与安全），再水下实测，写 `RESULTS.md`。下水每次解锁前逐条确认。
 
 ---
 
 ## 5. 安全（继承主项目约定）
-
 - 默认 `allow_arm=false`；解锁/下水前必须显式确认。
-- 全程 keepalive 线程发指令+GCS 心跳；退出/异常/Ctrl+C → 先回中位，本进程解锁过则自动上锁。
-- failsafe 已配置（`FS_PILOT_INPUT/TIMEOUT/GCS`）作硬兜底。
-- DVL 数据超龄/底锁丢失 → 主脚本立即停车回中位。
-- 保守限幅 `U_MAX`；辨识/首测用短行程、留足撞墙余量。
+- keepalive 线程发指令+GCS 心跳；退出/异常/Ctrl+C → 先回中位，本进程解锁过则自动上锁。
+- failsafe（`FS_PILOT_INPUT/TIMEOUT/GCS`）作硬兜底。
+- DVL 超龄/丢底锁、深度超龄 → 立即停车回中位。
+- roll/pitch 超阈值报警。保守 `U_MAX`；辨识/首测用短行程、留撞墙余量。
 
 ---
 
-## 附：纯开环变体（如你要"字面零反馈"）
-
-不接 DVL、全程不看传感器：W2 仍需（先辨识 surge 模型），W3 生成前馈 profile 后
-`go_distance.py --open-loop` 直接按时间发完 `u_x(t)` 即停。**代价**：模型误差/水流/推力不对称
-会积成位置与航向漂移，3m 可能偏几十 cm。建议至少保留 W4 航向保持。
-本方案默认走 DVL 航位推算（更稳），此变体作为对照可选。
+## 附：后续可扩展
+- **Holonomic 全向**：补 sway 辨识 → `go_waypoint --dx --dy` 直接斜move（接口已预留）。
+- **MPC**：surge/yaw 前馈换成主项目 MPC 范式（约束/多DOF/预测优势）。

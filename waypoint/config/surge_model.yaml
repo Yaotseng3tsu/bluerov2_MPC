@@ -1,0 +1,28 @@
+# BlueROV2 水平面 surge/sway 动力学参数 (Waypoint 模块)
+#
+# sim_truth : 离线仿真占位"真值" (取自通用 BlueROV2 文献量级)。真机未知,W2 辨识重估。
+# identified: W2 系统辨识结果 (surge_sysid_fit.py --write 回填);go_waypoint 优先用它。
+# sway      : 本期预留接口,暂不辨识 (holonomic 扩展时再填)。
+#
+# 约定: surge x 前向为正; v=dx/dt。水平中性浮 → 无净浮力项。
+# 参考量级 (BlueROV2 surge): eff_mass≈17 kg, 线性阻尼≈4 N/(m/s),
+#   二次阻尼≈18 N/(m/s)^2, u=1 水平推力量级 ~50 N (占位,真机偏低,W2 会重估)。
+
+sim_truth:
+  eff_mass: 17.0        # kg  (m - X_udot)
+  c_lin: 4.0            # N/(m/s)
+  c_quad: 18.0          # N/(m/s)^2
+  K_thrust_N: 50.0      # N   (u=1 的前向推力,占位)
+  u_max: 1.0
+
+identified:             # <-- W2 辨识后回填 (surge_sysid_fit.py --write)
+  eff_mass: null
+  c_lin: null
+  c_quad: null
+  K_thrust_N: null
+
+sway:                   # <-- 预留 (holonomic 扩展时辨识回填)
+  eff_mass: null
+  c_lin: null
+  c_quad: null
+  K_thrust_N: null

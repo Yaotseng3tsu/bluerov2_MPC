@@ -202,3 +202,15 @@
 
 ### 当前状态
 - ✅ 已建 `waypoint/` 与 `waypoint/README.md`(含架构图/文件规划/分步计划/安全)。下一步待确认后进 W1。
+
+### Phase W 范围升级 (2026-09-16): 前进3m → 相对航点定向航行 (Point-and-go 4DOF)
+- 澄清: BlueROV2(Heavy) 只独立控 4DOF (surge/sway/heave/yaw); roll/pitch 被动稳定, 只监测不控。
+- 范式 (用户选): **Point-and-go 4DOF** —— ①调深度 ②转航向 ③沿航向前进到距离; sway 接口预留 (holonomic 扩展)。
+- 闭环来源: surge=DVL vx 航位推算; heave=绝对深度(复用现有模型, 真闭环最准); yaw=ATTITUDE; 世界系积分(R(yaw))。
+- README 重写为该范围。
+
+### W3 surge 运动模型 + 前馈梯形轨迹 — ✅ 完成 (全离线)
+- 新增 `waypoint/config/surge_model.yaml` (sim_truth 占位 eff_mass17/c_lin4/c_quad18/K50; identified+sway 留 null)。
+- 新增 `waypoint/motion_model.py`: SurgePlant(RK4) + TrapezoidTraj(DOF无关梯形速度) + 逆动力学前馈 feedforward_cmd。
+- 离线自检 (dist3/v0.4/a0.15): 剖面积分3.000m, 开环终点3.002m(+0.1%), 末速+0.001m/s。出图 data/motion_model_selftest.png。
+- **发现**: sim_truth 占位 K=50 下前馈 |u| 峰值仅 0.137, 落在 ESC 死区(~0.3)内。真机 K_x 更低→u 更大, 待 W2 定; 无论如何 W5 需加**死区补偿**或选 u>0.3 的巡航/加速。
