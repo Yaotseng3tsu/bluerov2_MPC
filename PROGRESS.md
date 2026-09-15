@@ -214,3 +214,8 @@
 - 新增 `waypoint/motion_model.py`: SurgePlant(RK4) + TrapezoidTraj(DOF无关梯形速度) + 逆动力学前馈 feedforward_cmd。
 - 离线自检 (dist3/v0.4/a0.15): 剖面积分3.000m, 开环终点3.002m(+0.1%), 末速+0.001m/s。出图 data/motion_model_selftest.png。
 - **发现**: sim_truth 占位 K=50 下前馈 |u| 峰值仅 0.137, 落在 ESC 死区(~0.3)内。真机 K_x 更低→u 更大, 待 W2 定; 无论如何 W5 需加**死区补偿**或选 u>0.3 的巡航/加速。
+
+### W4 航向保持 heading_hold — ✅ 完成 (全离线)
+- 新增 `waypoint/heading_hold.py`: HeadingHold(PD, 误差 wrap 到 ±180 走最短转向, r 限幅) + 仅自检用 YawPlant。
+- 默认: kp1.0/kd0.2/r_limit0.3/tol±3°。自检: 0°→90° 3.6s 到位无超调; 170°→-170° 识别为+20°最短转向 1.7s 到位。PASS。
+- 出图 data/heading_hold_selftest.png。注: r_limit0.3 处于 ESC 死区边缘, 真机偏航可能偏弱(W6 调)。
