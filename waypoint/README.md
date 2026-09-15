@@ -79,7 +79,7 @@
 | `heading_hold.py` | ATTITUDE.yaw 航向 P/PD 控制 → r 修正 | W4 | ✅ |
 | `go_waypoint.py` | **主脚本**：4DOF 状态机 + 世界系航位推算 + 安全降级 | W5 | ✅ (SITL) |
 | `sim/fake_dvl.py` + `sim/sim_waypoint.py` | 离线仿真件（假 DVL + 4DOF SITL） | 仿真 | ✅ |
-| `RESULTS.md` | 干测/水下记录与复盘 | W6 | ⏳ 待连机 |
+| `RESULTS.md` | 干测/水下记录与复盘（现场填写模板） | W6 | ✅ 模板 (待填) |
 
 深度沿用主项目 [`src/depth_control.py`](../src/depth_control.py)+[`src/plant.py`](../src/plant.py)，不新建。
 
