@@ -219,3 +219,9 @@
 - 新增 `waypoint/heading_hold.py`: HeadingHold(PD, 误差 wrap 到 ±180 走最短转向, r 限幅) + 仅自检用 YawPlant。
 - 默认: kp1.0/kd0.2/r_limit0.3/tol±3°。自检: 0°→90° 3.6s 到位无超调; 170°→-170° 识别为+20°最短转向 1.7s 到位。PASS。
 - 出图 data/heading_hold_selftest.png。注: r_limit0.3 处于 ESC 死区边缘, 真机偏航可能偏弱(W6 调)。
+
+### 仿真件 (sim harness) — ✅ 完成 (离线, 为 W5 集成测试铺路)
+- `waypoint/sim/fake_dvl.py`: 假 A50 TCP 服务(16171), 吐与真机同格式 velocity JSON; 速度由回调提供; 独立可发恒定/正弦。
+- `waypoint/sim/sim_waypoint.py`: 4DOF SITL(MAVLink+假DVL一体), 解 MANUAL_CONTROL 的 ux/uz/ur → SurgePlant/DepthPlant/YawPlant 积分; 回传 HEARTBEAT/GLOBAL_POSITION_INT/ATTITUDE; DVL vx=surge机体速度。含 --current-vx/--dvl-bias/--no-dvl 供测鲁棒性与降级。
+- 联测: fake_dvl↔dvl_stream 10Hz PASS; sim_waypoint 遥测 HB/POS/ATT 正常, yaw0=30°→ATTITUDE读30.0°。
+- 未改动 tests/sim_vehicle.py (深度 SITL 9/9 保持)。
