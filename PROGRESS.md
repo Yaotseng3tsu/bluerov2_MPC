@@ -225,3 +225,17 @@
 - `waypoint/sim/sim_waypoint.py`: 4DOF SITL(MAVLink+假DVL一体), 解 MANUAL_CONTROL 的 ux/uz/ur → SurgePlant/DepthPlant/YawPlant 积分; 回传 HEARTBEAT/GLOBAL_POSITION_INT/ATTITUDE; DVL vx=surge机体速度。含 --current-vx/--dvl-bias/--no-dvl 供测鲁棒性与降级。
 - 联测: fake_dvl↔dvl_stream 10Hz PASS; sim_waypoint 遥测 HB/POS/ATT 正常, yaw0=30°→ATTITUDE读30.0°。
 - 未改动 tests/sim_vehicle.py (深度 SITL 9/9 保持)。
+
+### W5 主脚本 go_waypoint — ✅ 完成 (逻辑离线跑通; 末端精度调参待连机)
+- `waypoint/go_waypoint.py`: 4DOF 状态机 DESCEND→TURN→CRUISE→STOP→DONE。
+  深度=PID绝对深度闭环(复用src/pid+state); 航向=heading_hold(ATTITUDE); 前进=motion_model前馈+DVL航位推算(∫vx·dt)到距停。
+  复用 pseudo_stick 安全; 含死区补偿 deadzone_comp、--umax 覆盖、--vx-sign、--rel。
+- SITL 端到端验证 (sim_waypoint+假DVL):
+  - 基线 h90/d3/z0.5: DONE REACHED, s=3.00m, depth 稳0.50, yaw 稳90。出图 data/go_waypoint_base.png。
+  - 水流6N: DONE REACHED s≈3.0 (DVL 航位推算对水流鲁棒), 残余v≈0.48(无位置控, 诚实报告), depth 保持0.40。
+  - DVL偏大20%: 停在 DVL 测得3m(真实~2.5m)——演示 DVL 标定误差直接进位置误差(W1须定标/定符号)。
+  - DVL失效(--no-dvl): CRUISE 入口即 DVL_LOST→拒绝盲走, s=0, 深度/航向仍保持。
+- 修复(sim 中发现): ①STOP 分紧急(全中位)/正常到达(保持深度航向,只切前进); ②稳停超时兜底(水流下vx不归零); ③STOP 阶段持续重算深度/航向(原冻结致漂移)。
+
+### 离线路线小结
+W1代码/W3/W4/仿真件/W5 全部离线跑通。剩余均需连机: W1真验证(vx符号/更新率/直连16171)、W2真实采集辨识、W6干测→水下→复盘。
