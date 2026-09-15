@@ -97,9 +97,9 @@ def main() -> int:
     dvl = None
     if not args.no_dvl:
         def vel():
+            # 真机 DVL 底锁与是否解锁无关: 仿真恒有效 (贴底)
             return {"vx": surge.v * args.dvl_bias, "vy": 0.0, "vz": depth.w,
-                    "valid": bool(state["armed"]) or abs(surge.v) > 1e-6,
-                    "altitude": 2.0}
+                    "valid": True, "altitude": 2.0}
         dvl = FakeDvl(vel, port=args.dvl_port, rate_hz=10.0).start()
 
     def send_heartbeat():

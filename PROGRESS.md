@@ -239,3 +239,14 @@
 
 ### 离线路线小结
 W1代码/W3/W4/仿真件/W5 全部离线跑通。剩余均需连机: W1真验证(vx符号/更新率/直连16171)、W2真实采集辨识、W6干测→水下→复盘。
+
+### W2 surge 系统辨识 (采集+拟合) — ✅ 代码完成 (真实参数待连机采集)
+- `waypoint/surge_sysid_collect.py`: 开环阶跃(默认±0.35/0.45/0.55 顶过死区) + DVL 记 vx; 含**距离护栏**(段内 |s|>--max-dist 回中位防撞墙)、DVL 丢失跳段、--umax 覆盖、--vx-sign。深度靠操作者维持(只发 x)。
+- `waypoint/surge_sysid_fit.py`: 仿真误差最小化拟合 vx(t) → (b_u,b0,a_lin,a_quad); 固定 eff_mass 反算 K/c_lin/c_quad; b0=残余加速度仅报告; --write 回填 surge_model.yaml identified。
+- **SITL 验证管线**: 对 sim_truth(K50/c_lin4/c_quad18/m17) 采集拟合, R²=1.000, 恢复 c_lin4.01/c_quad16.1/K46.1(≤10%), 终速1.08 vs 1.13。--write 写入/还原均正常。
+- 遵守约定: SITL 值未入库 (identified 保持 null, 待真机)。
+- 顺带修 sim: DVL valid 恒 True(底锁与解锁无关, 更贴近真机 A50)。
+
+### 离线路线 100% 完成
+W1代码 / W2代码 / W3 / W4 / 仿真件 / W5 全部离线跑通并验证。连机那天为纯执行:
+W1真验证(vx符号/直连16171/更新率) → W2采集(surge_sysid_collect --arm)→拟合(surge_sysid_fit --write)→ W5(go_waypoint 直接用 identified 参数) → W6 干测/水下/复盘。
