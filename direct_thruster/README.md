@@ -1,146 +1,236 @@
-# Direct Thruster Control — 研究文档（绕过 ArduSub 混控，独立驱动 8 个推进器）
+# Direct Thruster Control — 独立驱动 8 个推进器（修改并编译 ArduSub）
 
-> **状态：v0 草稿**（2026-09-16）。本文件夹是**独立研究子任务**，不改动 `waypoint/` 及现有任何代码。
-> 目标是评估并实现"跳过 MANUAL_CONTROL/伪手柄，直接对 8 个 T200 逐个连续给 PWM"，供 **RL / 自定义分配矩阵 / 直接控制**。
-> ⚠️ 待办：把两段 ChatGPT 讨论（"比较 BlueROV2 控制方式"等）的结论贴进 §7，与本文对齐后升级到 v1。
-
----
-
-## 0. 背景与动机
-
-- **现状（现有研究）**：`waypoint/` 与整个 `bluerov2_mpc` 走 **ArduSub 标准链路** ——
-  `MANUAL_CONTROL(x/y/z/r)` → ArduSub **固定 Heavy 分配矩阵**（motor mixer）→ 8 个 ESC。
-  已验证：轴映射标准 Heavy、推力权限偏低（u=1.0→±80µs）。
-- **痛点**：官方**不提供 per-thruster 的 Python 接口**；RC_OVERRIDE 与 MANUAL_CONTROL 都要经过混控分配，
-  无法独立、连续、协调地驱动每个桨 —— 这正是 RL（动作空间=8 维推力）或自定义控制分配所需要的。
-- **本研究**：另开一条控制路径，独立文件夹推进，**不干扰现有 MANUAL_CONTROL 链路**（保留其为安全兜底）。
+> **状态：v1**（2026-09-16，已吸收两段 ChatGPT 讨论）。独立研究子任务，**不改动 `waypoint/`、`src/`、`config/`**。
+> 目标：跳过 MANUAL_CONTROL/伪手柄，让上位机对 8 个 T200 **逐个连续给归一化推力**，供 **MPC / RL / 自定义推力分配**。
+> 路线（已定）：**保留 ArduSub 电机输出框架，替换"混控结果"这一层** —— 需修改并编译 ArduSub C++；MPC/分配器/上位机仍全用 Python。
 
 ---
 
-## 1. 方案对比（先评估，再决定是否 fork 固件）
+## 0. 项目组织：两份程序，不是把 Python 搬成 C++
 
-| 方案 | 独立/连续控制 | 需改固件? | 上位机接口 | 延迟/频率 | 适合 RL? | 备注 |
-|---|---|---|---|---|---|---|
-| **A. `MAV_CMD_DO_MOTOR_TEST`** | 单桨、逐个 | 否 | pymavlink | 有超时、低频 | ❌ | 只适合测试单桨方向/健康 |
-| **B. `MAV_CMD_DO_SET_SERVO`** | 单通道 | 否 | pymavlink | 每周期可能被混控覆盖 | ❌ | 需把 `SERVOn_FUNCTION` 设 Disabled 才不被覆盖；不协调 |
-| **C. Lua 脚本 + Script 输出** | 8 桢独立 | **否**（仅改参数+脚本） | 板载 Lua 读取 | 受 Lua 调度限制 | 🟡 | ArduSub 支持 Script1–16（Func 94–109）；`SRV_Channels:set_output_pwm`。**onboard/低频控制的最轻方案** |
-| **D. 自定义 `FRAME_CONFIG`** | 输入→电机直通 | 否 | MANUAL_CONTROL | 标准 | 🟡 | 社区 MallARD 用 `FRAME_CONFIG=8` 做过 1:1 直通；需确认 ArduSub 现成 frame 是否满足 |
-| **E. Fork + 编译 ArduSub** | **8 桢独立、连续、协调** | **是** | 自定义/`SET_ACTUATOR_CONTROL_TARGET` | 低延迟、控制率 | ✅ | 最强但最重；**off-board RL 的正解** |
+```
+开发电脑
+├── bluerov2_MPC/                 现有 Python 项目 (不动)
+│   ├── waypoint/ … MPC/分配器/DVL/安全范式
+│   └── direct_thruster/          ← 本研究 (含未来的 external_thruster.py 上位机接口)
+│
+└── ardupilot-external/           另外 clone 的 ArduPilot 源码 (修改版 ArduSub)
+    ├── ArduSub/  libraries/AP_Motors/
+    └── build/navigator/bin/ardusub   ← 编译产物, 经 BlueOS 上传到 ROV
+```
 
-**关键判断**：
-- 若 RL/控制器**跑在板载**或对更新率要求不高 → **先试 C（Lua）**，零编译、可回退，最快出可行性结论。
-- 若 RL/控制器**跑在上位机、需要控制率下发 8 维动作** → Lua 难以高频摄入 off-board 动作 → **走 E（fork）**，
-  用一条 MAVLink 消息把 8 个归一化推力直送固件、直写电机输出。**这也是本项目倾向的路线。**
+**运行关系**：
 
-> 建议路线：**先花半天验证 C（Lua）的实际更新率/延迟**（作为 baseline 和回退），
-> 再投入 E（fork）。两者不冲突，C 的参数改动也可秒回退。
+```
+水面 (Python):  MPC → 推力分配器 → 8 路归一化命令
+                          │  MAVLink (SET_ACTUATOR_CONTROL_TARGET, 现有网线/缆)
+                          ▼
+ROV (修改版 ArduSub, C++):  接收 → 校验控制权/有效期 → 替换混控结果 → 原有电机输出层
+                          │
+                          ▼
+                    Navigator → ESC → 8×T200
+```
 
----
-
-## 2. 路线 E（fork + 编译）—— Step by Step
-
-> 全程**先 SITL 后真机**；每一步先与用户确认再推进；**保留官方固件备份**可随时回退。
-
-### E1 · 工具链与源码
-- [ ] 克隆 ArduPilot 源码（**ArduSub-stable** 分支）**含 submodules**：
-  `git clone -b ArduSub-stable --recurse-submodules https://github.com/ArduPilot/ardupilot`
-- [ ] 装 waf 构建依赖：`Tools/environment_install/install-prereqs-ubuntu.sh -y`（在 WSL/Linux 上）。
-- [ ] 目标板：**Navigator**（RPi4 上的 Linux target），waf board = `navigator`。
-
-### E2 · 先在 SITL 打通
-- [ ] `./waf configure --board sitl && ./waf sub`；`Tools/autotest/sim_vehicle.py -v ArduSub` 起 SITL。
-- [ ] 在 SITL 验证"直写 8 输出"的改动逻辑，**完全不碰真机**。
-
-### E3 · 定位混控/输出代码（研究点，需读源码确认）
-- [ ] Sub 的电机输出：`ArduSub/` + `libraries/AP_Motors/AP_Motors6DOF.*`（6DOF 分配矩阵）。
-- [ ] 找到"分配矩阵 → 各电机推力 → `SRV_Channels` 写 PWM"的落点（`output_to_motors` / `output_armed` 一类）。
-- [ ] 确认电机输出通道与 `SERVOn_FUNCTION`（Motor1..8）的映射。
-
-### E4 · 实现"直写通道"
-- [ ] 选消息：优先复用 **`SET_ACTUATOR_CONTROL_TARGET`**（MAVLink 标准，含 8 个归一化输出 group），
-  或自定义消息；上位机按此发 8 维动作。
-- [ ] 加一个**模式门**（param 或消息里的标志）：激活时**用消息里的 8 值直接写电机输出、跳过分配矩阵**；
-  未激活时行为与官方一致（保留 MANUAL_CONTROL）。
-- [ ] **失效保护（必做）**：超过 X ms 未收到新动作 → 8 输出归中位 + 报警（对齐 `pseudo_stick` 的看门狗范式）。
-- [ ] 保留 arm/disarm、ESC 死区、限幅逻辑。
-
-### E5 · 编译
-- [ ] `./waf configure --board navigator && ./waf sub` → 产出 Navigator 固件（`build/navigator/bin/ardusub`）。
-
-### E6 · 刷入 Navigator（BlueOS）
-- [ ] 通过 **BlueOS 自定义固件上传**（Pirate/开发者模式的 firmware upload）刷入自编译固件。
-- [ ] **先备份当前官方固件**；确认可一键回退官方版。
-
-### E7 · 上位机接口（与现有安全范式对齐）
-- [ ] Python 端按控制率发送 8 维动作消息；复用 `pseudo_stick` 的连接/心跳/看门狗/退出归中+自动上锁范式。
-- [ ] 提供"直控层"替换 `pseudo_stick.send` 的等价物（新模块，不改旧文件）。
-
-### E8 · 安全与验证阶梯
-- [ ] SITL 逐桨 → 干测（出水、单桨短点动、读 `SERVO_OUTPUT_RAW` 验证直写生效且旁路了分配）→ 水下。
-- [ ] 失效保护实测（断消息 → 归中）；ESC 死区/冷却/急停预案。
+C++ 只负责**接收、执行、保护**；Python 负责研究算法（改 MPC/分配/故障策略**不需要**重编 ArduSub，只有改机载接口/底层保护才重编）。
 
 ---
 
-## 3. 路线 C（Lua）—— 快速可行性验证（推荐先做）
+## 1. 关键决策
 
-- [ ] 把 8 个推进器的 `SERVOn_FUNCTION` 改为 `Script1..Script8`（Function ID **94–101**）。
-- [ ] 写 Lua 脚本用 `SRV_Channels:set_output_pwm(<func>, <pwm>)`（或 `set_output_pwm_chan_timeout` 带超时）
-  周期性写 8 输出。
-- [ ] 测**实际更新率 / 抖动 / 端到端延迟**；结论决定是否够 RL 用。
-- [ ] 动作来源：板载脚本内生成，或从 param/命名值/串口摄入 off-board 动作（评估瓶颈）。
-- 优点：**零编译、秒回退**（改回 `SERVOn_FUNCTION` 即恢复官方）。
-
----
-
-## 4. 与现有项目的关系
-
-- **独立**：新文件夹 `direct_thruster/`，不改 `waypoint/`、`src/`、`config/`。
-- **可复用**：DVL 读取（`waypoint/dvl_stream.py`）、状态估计、安全范式（看门狗/退出上锁）都可复用为直控层的外壳。
-- **兜底**：官方 MANUAL_CONTROL 链路与 `waypoint/` 保持可用，作为直控失败时的安全回退。
+- **传输消息**：复用 MAVLink 标准 `SET_ACTUATOR_CONTROL_TARGET`（含 `float[8]`）作容器。
+  ⚠️ 标准 group 0 = roll/pitch/yaw/throttle，**不等于 8 个独立电机**；需在修改版固件里**自定义约定**
+  （如 `group_mlx=1` 表示 Motor1–8），收发两端一致。
+- **接入层级**：替换 `AP_Motors6DOF::output_armed_stabilizing()` 里**产生 `_thrust_rpyt_out[]` 的混控部分**，
+  **不是**在 MAVLink 回调里临时 `rc_write()`。这样才能复用后面的**电机反向、总电流限制、PWM 转换**。
+- **归一化定义**：接口的 `[-1, 1]` 是**归一化执行器命令**，不是牛顿；分配器算出的 fᵢ 需经**推力标定**转到这层。
+- **先 vanilla 后修改**：第一里程碑是"同版本、未改代码的 ArduSub 自编译后能在这台 ROV 正常启动"。
 
 ---
 
-## 5. 风险与回退
+## 2. 里程碑（严格按序，不跳步）
 
-- **刷错/变砖**：务必先备份官方固件，确认 BlueOS 一键回退路径。
-- **失控**：直写电机=没有混控/失效兜底，**失效保护必须先于任何解锁实现并验证**。
-- **热管理**：干测只短点动（气冷）。
-- **可维护性**：fork 后需跟踪上游 ArduSub 更新（记录改动 diff、基于 tag 分支）。
+| M | 目标 | 通过判据 |
+|---|---|---|
+| **M0** | 记录实机版本 + 导出参数 + 备份 | BlueOS 版本号、参数文件、输出功能/反向/PWM 范围都存档 |
+| **M1** | 环境：WSL2 Ubuntu + clone 对应 tag + 交叉工具链 | `./waf configure --board navigator` 通过 |
+| **M2** | **编译 vanilla（一行不改）→ 装机 → 验证 → 验证可回退** | 自编译 ardusub 装上后 heartbeat/IMU/depth/8路输出正常；且能一键恢复官方 |
+| **M3** | 改 C++：8 路接收 + 替换混控 + 失效保护 | SITL 跑通 |
+| **M4** | 编译修改版 → 装机 → 干测 | 断开推进器动力，`SERVO_OUTPUT_RAW` 验证 8 路独立、旁路了分配 |
+| **M5** | 验收 + Python 接口 + 对接 MPC/RL | 8 路独立 + 失效停机四项验收通过（见 §7） |
 
----
-
-## 6. 里程碑（建议顺序）
-
-1. **M0** 本文档 + 决策：先 Lua 验证还是直接 fork（见 §7 待与 ChatGPT 对齐）。
-2. **M1** 路线 C（Lua）可行性：8 桢直写 + 更新率/延迟报告。
-3. **M2** 路线 E SITL：自定义消息直写 + 失效保护，SITL 跑通。
-4. **M3** 路线 E 真机：Navigator 编译刷入 + 干测逐桨验证旁路分配。
-5. **M4** 直控层 Python 接口 + 与 RL/控制器对接。
+> **M2 → M3 绝不能跳**：否则一旦"ArduSub 起不来"，无法区分是你的 C++ 错还是交叉编译环境错。
 
 ---
 
-## 7. 待办：与 ChatGPT 讨论对齐（reconcile）
+## 3. Step by Step
 
-> 我（助手）无法直接读取以下分享链接（页面 JS 渲染，抓取到的是登录壳）。请把两段讨论的**关键结论**贴过来，
-> 我据此把本文从 v0 升到 v1（尤其是：最终选定的方案、具体 MAVLink 消息、涉及的源码文件、编译/刷机注意点）。
+### Phase 0 · 记录与备份（M0，在 BlueOS 网页做）
+- [ ] `Autopilot Firmware` → 记录**当前 ArduSub 版本号**（如 `ArduSub 4.x.x`）。
+- [ ] `Autopilot Parameters` → **导出完整参数文件**（备份）。
+- [ ] 记下：8 个推进器的输出功能（Motor1–8 对应哪路）、反向参数、PWM 范围、BlueOS 版本。
+- [ ] 确认 BlueOS 有 **Restore default ArduSub firmware**（回退路径存在）。
+> 也可用 MAVLink 只读查版本：连上后取 `AUTOPILOT_VERSION` / heartbeat 里的版本信息。
 
-- 链接1（"比较 BlueROV2 控制方式"）：<https://chatgpt.com/s/t_6aa9e72404d88191987e892ba2c841da>
-- 链接2：<https://chatgpt.com/s/t_6aa9ec91260c8191a6bf2e5c64bf3845>
-- [ ] 贴入结论 → 确认 Lua-first vs fork-first
-- [ ] 确认选用的消息（`SET_ACTUATOR_CONTROL_TARGET` / 自定义）
-- [ ] 确认目标板/BlueOS 刷机的具体步骤是否与本文一致
+### Phase 1 · 构建环境（M1）
+- [ ] Windows 用 WSL2 装 Ubuntu（旧版 ArduSub 分支建议 **Ubuntu 22.04**）：
+  `wsl --install -d Ubuntu-22.04`（Python 控制程序继续留在 Windows）。
+- [ ] clone 另一份源码（**含 submodules**）：
+  ```bash
+  mkdir -p ~/rov-dev && cd ~/rov-dev
+  git clone --recurse-submodules https://github.com/ArduPilot/ardupilot.git ardupilot-external
+  cd ardupilot-external
+  ```
+- [ ] **切到实机对应的 tag** 并建分支（**别用 master**；下例仅示例版本）：
+  ```bash
+  git tag -l 'ArduSub-*' --sort=-v:refname | head -n 20
+  git switch -c external-thrusters ArduSub-4.5.3      # ← 换成 M0 记录的真实版本
+  git submodule update --init --recursive
+  ```
+- [ ] 装官方构建依赖：
+  ```bash
+  Tools/environment_install/install-prereqs-ubuntu.sh -y
+  . ~/.profile
+  ```
+- [ ] **交叉工具链**（x86 电脑生成 ARM Linux 程序；旧 BlueOS/Bullseye 用 **GCC 10.2**，避免运行库不兼容）：
+  ```bash
+  mkdir -p ~/toolchains && cd ~/toolchains
+  wget -c https://developer.arm.com/-/media/Files/downloads/gnu-a/10.2-2020.11/binrel/gcc-arm-10.2-2020.11-x86_64-arm-none-linux-gnueabihf.tar.xz
+  tar -xf gcc-arm-10.2-2020.11-x86_64-arm-none-linux-gnueabihf.tar.xz
+  ```
+
+### Phase 2 · 编译 vanilla 并验证（M2，**门槛，勿跳**）
+- [ ] configure（`--toolchain` 指向**含工具名前缀**的路径，不只是解压目录）：
+  ```bash
+  cd ~/rov-dev/ardupilot-external
+  export ARM_TC="$HOME/toolchains/gcc-arm-10.2-2020.11-x86_64-arm-none-linux-gnueabihf"
+  ./waf configure --board navigator --toolchain "$ARM_TC/bin/arm-none-linux-gnueabihf"
+  ./waf sub -j4
+  ```
+- [ ] 检查产物是 **ARM ELF**（不是 x86-64）：
+  ```bash
+  ls -lh build/navigator/bin/ardusub
+  file build/navigator/bin/ardusub        # 期望: ELF 32-bit LSB ... ARM ...
+  ```
+- [ ] BlueOS：**上传固件前先确保未解锁、物理隔离推进器动力/断开 ESC 信号**。
+  `Autopilot Firmware → Upload custom firmware → 选 ardusub → Install`。
+- [ ] 验证 heartbeat 恢复、IMU/depth 遥测正常、参数可读、8 路输出正常（**"安装成功"字样不够**）。
+- [ ] 验证能 `Restore default ArduSub firmware` 回官方。
+> 备选：BlueOS 的 OpenVSCode 扩展可在 ROV 上直接 clone+编译（避开 PC→ARM 交叉编译兼容问题）；
+> 但长期维护 fork 仍建议 Ubuntu 主机 + Git branch 作正式开发环境。
+
+### Phase 3 · 修改 C++（M3）
+要改的位置（**这是待开发内容，不是已存在功能**）：
+
+| 文件 | 修改 |
+|---|---|
+| `ArduSub/GCS_MAVLink_Sub.cpp` | 接收外部 8 路命令；校验消息目标/来源/数值/协议约定（group_mlx=1） |
+| `libraries/AP_Motors/AP_Motors6DOF.h` | 加 8 路命令缓存、有效标志、更新时间、setter 接口 |
+| `libraries/AP_Motors/AP_Motors6DOF.cpp` | 外部控制启用时，用 8 路命令**替换混控结果** `_thrust_rpyt_out[]` |
+| ArduSub 模式/控制源管理 | 何时接受外部控制；进入/退出/上锁时清理命令缓存 |
+| `ArduSub/failsafe.cpp` 等 | 外部命令超时的安全动作，并与现有失联保护协调 |
+
+**接入点（关键）** —— 当前正常输出链：
+```
+output_armed_stabilizing() → _thrust_rpyt_out[i]
+        → output_to_motors(): motor_out[i] = calc_thrust_to_pwm(_thrust_rpyt_out[i])
+        → rc_write(i, motor_out[i]) → Navigator
+```
+目标结构：
+```
+output_armed_stabilizing()
+   ├── NORMAL:   原混控 → _thrust_rpyt_out[]
+   └── EXTERNAL: 你的 8 路命令 → _thrust_rpyt_out[]
+        → 共同的输出保护/限制 → output_to_motors() → rc_write()
+```
+- ⚠️ **不能"填完数组立即 return"**：电机**反向处理**与**总电流限制**都在这个函数里，必须保留或重新接入。
+- ⚠️ **pilot-input failsafe**：`failsafe_pilot_input_check()` 原本查驾驶输入更新时间。外部模式要**以通过校验的外部命令判断新鲜度**，
+  不能因为"还在发 GCS 心跳"就当满足；**保留** GCS/漏水/电池等失效保护，别为了让新代码跑就关掉 failsafe。
+
+### Phase 4 · 编译修改版 + 装机（M4）
+- [ ] `./waf sub -j4`（增量编译，通常**不需要** `./waf clean`）；产物仍是 `build/navigator/bin/ardusub`。
+- [ ] 装机前再次：未解锁 + 物理隔离推进器动力；BlueOS 上传安装。
+- [ ] **干测**：断开推进器动力，读 `SERVO_OUTPUT_RAW` 验证"只改一路→只有对应电机变、其余中位"，确认旁路了分配矩阵。
+
+### Phase 5 · 验收（M5，见 §7）
+
+---
+
+## 4. Python 上位机接口（第一版）
+
+用 `SET_ACTUATOR_CONTROL_TARGET` 作传输容器；**前提是固件已实现本项目约定的 `group_mlx=1` 接收**（标准消息存在 ≠ 原版按此执行）。
+下面只负责发送，不负责解锁/开启外部模式/安全：
+
+```python
+import math, time
+from collections.abc import Sequence
+
+def send_thrusters(conn, commands: Sequence[float]) -> None:
+    """向修改版 ArduSub 发送 8 路归一化执行器命令 (需固件实现 group_mlx=1 接口)。"""
+    values = [float(v) for v in commands]
+    if len(values) != 8:
+        raise ValueError("必须提供八个推进器命令")
+    if not all(math.isfinite(v) for v in values):
+        raise ValueError("命令不能含 NaN/Inf")
+    if not all(-1.0 <= v <= 1.0 for v in values):
+        raise ValueError("命令必须位于 [-1, 1]")
+    conn.mav.set_actuator_control_target_send(
+        time.monotonic_ns() // 1000,
+        1,                      # 本项目约定组号 (非官方 Motor1-8 定义)
+        conn.target_system, conn.target_component,
+        values,
+    )
+
+# 例: 先发全中位
+# send_thrusters(conn, [0.0] * 8)
+```
+- `[-1,1]` = 归一化执行器命令，**非牛顿**；分配器的 fᵢ 需经推力标定转到这层。
+- 未来把连接/心跳/看门狗/退出归中+自动上锁范式从 `waypoint` 的 `pseudo_stick` 复用过来，作为直控层外壳。
+
+---
+
+## 5. 两个版本兼容坑（务必记住）
+
+1. **源码 ↔ 构建工具**：旧 ArduSub 分支的 waf 可能不兼容较新 Python 环境 → 用匹配的 Ubuntu（如 22.04）。
+2. **编译产物 ↔ 机载运行库**：较新编译器生成的程序在旧 Bullseye 上会因 glibc/运行库不匹配**起不来**
+   → 旧 BlueOS 用 **GCC 10.2** 工具链。**"电脑上编译成功 ≠ ROV 上能启动"。**
+
+---
+
+## 6. 安全与回退
+
+- **回退**：BlueOS `Restore default ArduSub firmware`；上传自定义前**必导出参数**，升/降级后按建议重新应用默认参数。
+- **失控防护**：直写电机=没有混控/pilot failsafe 兜底 → **失效保护必须先于任何解锁实现并验证**。
+- **外部命令过期的默认动作**（水槽测试）：**回中位 + 上锁 + 锁存故障，必须显式重新启用**；
+  **不**恢复原 mixer、**不**无限保持上一条命令。
+- 干测只短点动（气冷）；保留官方 MANUAL_CONTROL 链路作兜底。
+
+---
+
+## 7. 第一个验收目标（不是 MPC，而是"8 路独立 + 失联停机"）
+
+| 测试 | 应确认 |
+|---|---|
+| 未解锁时发非零命令 | 输出保持安全中位 |
+| 只改一路输入 | 只有对应电机变，其余中位 |
+| 停发命令但心跳仍在 | 机载外部命令看门狗触发（归中+上锁+锁存） |
+| 非法数值/错误来源/退出外部模式 | 不接受危险输出，不重放旧缓存 |
+
+**测试阶梯**：官方 **SITL（跑真实 ArduSub 代码）** → 断开推进器的实机输出测量 → 受控水下。
+⚠️ 本项目的"假 ArduSub"（`tests/sim_vehicle.py` / `waypoint/sim`）**不能替代 SITL** 这一步。
+
+---
+
+## 8. 备选路线（记录，暂不走）
+
+- **Lua passthrough（不编译固件）**：把 8 个 `SERVOn_FUNCTION` 改为 `Script1–8`（Func 94–101），
+  Lua `SRV_Channels:set_output_pwm` 直写。适合 onboard/低频；off-board 高频摄入动作困难。可秒回退，适合先做可行性/更新率验证。
+- **自定义 `FRAME_CONFIG` 直通**（社区 MallARD `FRAME_CONFIG=8`）：评估是否有现成 1:1 frame。
 
 ---
 
 ## 参考来源（已核对）
-
-- ArduSub 独立控桨讨论：<https://discuss.bluerobotics.com/t/how-to-control-thrusters-independently/9870> ·
-  <https://discuss.bluerobotics.com/t/independent-control-of-a-motor/21558> ·
-  MAVSDK issue <https://github.com/mavlink/MAVSDK/issues/2145>
-- Lua 直写输出：ArduSub 输出映射 <https://ardupilot.org/sub/docs/common-rcoutput-mapping.html> ·
-  SRV_Channels 超时覆盖 PR <https://github.com/ArduPilot/ardupilot/pull/14366> ·
-  Scripting README <https://github.com/ArduPilot/ardupilot/blob/master/libraries/AP_Scripting/README.md>
-- 自定义 frame 直通（MallARD, FRAME_CONFIG=8）：<https://github.com/EEEManchester/MallARD_Pixhwak>
-- 编译/刷机：官方 Build ArduSub <https://www.ardusub.com/developers/developers.html> ·
-  Navigator 自定义固件 <https://discuss.bluerobotics.com/t/process-to-load-custom-ardupilot-build-into-blue-os-on-navigator-setup/20366> ·
-  waf 构建讨论 <https://discuss.bluerobotics.com/t/blueos-feedback-build-firmware-with-waf-for-the-navigator-flight-controller/13081>
+- 官方 Build ArduSub <https://www.ardusub.com/developers/developers.html> · 输出映射 <https://ardupilot.org/sub/docs/common-rcoutput-mapping.html>
+- Navigator waf 构建/工具链讨论 <https://discuss.bluerobotics.com/t/blueos-feedback-build-firmware-with-waf-for-the-navigator-flight-controller/13081> ·
+  自定义固件装机 <https://discuss.bluerobotics.com/t/process-to-load-custom-ardupilot-build-into-blue-os-on-navigator-setup/20366>
+- 独立控桨讨论 <https://discuss.bluerobotics.com/t/how-to-control-thrusters-independently/9870> · MAVSDK issue <https://github.com/mavlink/MAVSDK/issues/2145>
+- Lua 直写输出 SRV_Channels PR <https://github.com/ArduPilot/ardupilot/pull/14366> · Scripting README <https://github.com/ArduPilot/ardupilot/blob/master/libraries/AP_Scripting/README.md>
