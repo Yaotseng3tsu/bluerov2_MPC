@@ -37,4 +37,4 @@
 
 ## 决策 — ✅ 已定：**版本 A（匹配当前 4.1.2 fork）**
 - 理由：waypoint 已在 4.1.2 验证、最小扰动；目标函数早已存在，fork 无碍。
-- 构建端：Ubuntu 20.04 + GCC 10.2（Bullseye 兼容）。checkout `ArduSub-4.1.2`。
+- 构建端：**Ubuntu 22.04**（WSL catalog 无 20.04）+ **GCC 10.2** 交叉工具链（对 ROV 的 Bullseye）。checkout `ArduSub-4.1.2`。

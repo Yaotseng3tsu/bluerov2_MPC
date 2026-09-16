@@ -84,8 +84,9 @@ C++ 只负责**接收、执行、保护**；Python 负责研究算法（改 MPC/
 ### Phase 1 · 构建环境（M1）
 - **本机基线（M0 已确认，见 [M0_baseline.md](M0_baseline.md)）**：ArduSub **4.1.2**、Navigator、BlueOS **1.4.2**（Bullseye）、
   FRAME_CONFIG=2（Heavy）、SERVO1–8=Motor1–8/1100–1900。**checkout tag = `ArduSub-4.1.2`**；工具链 **GCC 10.2**（对 Bullseye）。
-- [ ] Windows 用 WSL2 装 Ubuntu（**4.1.x 老分支建议 Ubuntu 20.04**，waf/依赖更匹配；22.04 也可试）：
-  `wsl --install -d Ubuntu-20.04`（Python 控制程序继续留在 Windows）。
+- [ ] Windows 用 WSL2 装 Ubuntu（本机 `wsl --list --online` **无 20.04**，用 **Ubuntu-22.04**，对 4.1 分支可用）：
+  `wsl --install -d Ubuntu-22.04`（Python 控制程序继续留在 Windows）。
+  > 关键兼容项是交叉工具链 GCC 10.2（对应 ROV 的 Bullseye），与主机 Ubuntu 版本无关。
 - [ ] clone 另一份源码（**含 submodules**）：
   ```bash
   mkdir -p ~/rov-dev && cd ~/rov-dev
