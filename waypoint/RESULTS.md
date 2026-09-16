@@ -16,6 +16,7 @@
 - [x] MAVLink 心跳 OK（飞控 sys1/comp1，autopilot=3，DISARMED/MANUAL）；深度源 GLOBAL_POSITION_INT @26Hz，噪声±5mm
 - [x] 航向传感器 OK（`yaw_monitor` 手转验证：ATTITUDE.yaw 跟随全圈，范围[-180,+176]°跨度356°，@20Hz；roll/pitch 实时响应）→ heading_hold 输入可靠
 - [x] failsafe 已配：FS_PILOT_INPUT=2 / FS_PILOT_TIMEOUT=3 / FS_GCS_ENABLE=2 / FS_LEAK_ENABLE=1
+- [x] `go_waypoint` 全链路(不解锁)真机联调：连接/预热(深度+航向)/DESCEND→TURN 转换/从真实yaw算r指令(ur=+0.30饱和)/CSV/超时安全退出 均正常
 - [ ] 电量/漏水/系缆检查；桨叶周围清空；急停/断电预案确认
 - [ ] 约定：任何解锁前口头确认现场安全
 
