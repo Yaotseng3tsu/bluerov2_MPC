@@ -82,8 +82,10 @@ C++ 只负责**接收、执行、保护**；Python 负责研究算法（改 MPC/
 > 也可用 MAVLink 只读查版本：连上后取 `AUTOPILOT_VERSION` / heartbeat 里的版本信息。
 
 ### Phase 1 · 构建环境（M1）
-- [ ] Windows 用 WSL2 装 Ubuntu（旧版 ArduSub 分支建议 **Ubuntu 22.04**）：
-  `wsl --install -d Ubuntu-22.04`（Python 控制程序继续留在 Windows）。
+- **本机基线（M0 已确认，见 [M0_baseline.md](M0_baseline.md)）**：ArduSub **4.1.2**、Navigator、BlueOS **1.4.2**（Bullseye）、
+  FRAME_CONFIG=2（Heavy）、SERVO1–8=Motor1–8/1100–1900。**checkout tag = `ArduSub-4.1.2`**；工具链 **GCC 10.2**（对 Bullseye）。
+- [ ] Windows 用 WSL2 装 Ubuntu（**4.1.x 老分支建议 Ubuntu 20.04**，waf/依赖更匹配；22.04 也可试）：
+  `wsl --install -d Ubuntu-20.04`（Python 控制程序继续留在 Windows）。
 - [ ] clone 另一份源码（**含 submodules**）：
   ```bash
   mkdir -p ~/rov-dev && cd ~/rov-dev
@@ -93,7 +95,7 @@ C++ 只负责**接收、执行、保护**；Python 负责研究算法（改 MPC/
 - [ ] **切到实机对应的 tag** 并建分支（**别用 master**；下例仅示例版本）：
   ```bash
   git tag -l 'ArduSub-*' --sort=-v:refname | head -n 20
-  git switch -c external-thrusters ArduSub-4.5.3      # ← 换成 M0 记录的真实版本
+  git switch -c external-thrusters ArduSub-4.1.2      # ← 本机 M0 确认版本
   git submodule update --init --recursive
   ```
 - [ ] 装官方构建依赖：
