@@ -4,6 +4,16 @@
 > 目标：跳过 MANUAL_CONTROL/伪手柄，让上位机对 8 个 T200 **逐个连续给归一化推力**，供 **MPC / RL / 自定义推力分配**。
 > 路线（已定）：**保留 ArduSub 电机输出框架，替换"混控结果"这一层** —— 需修改并编译 ArduSub C++；MPC/分配器/上位机仍全用 Python。
 
+> ## ⚠️ 与 waypoint 的时序边界（务必先读）
+> **写文档 / 在 Ubuntu·WSL 上 clone 编译（哪怕编出 `ardusub`）= 不碰 ROV，随时可做、不影响 waypoint。**
+> **一旦把任何自编译固件刷进 ROV（哪怕 M2 的 vanilla 未改版）= 替换了 waypoint 依赖的官方固件，会影响。**
+> 因为 waypoint 走的是当前官方 ArduSub（MANUAL_CONTROL→混控）；刷机可能导致 ROV 起不来/丢 heartbeat、参数被重置需重应用、多一层不确定性。
+>
+> **时序规则：**
+> 1. 先用**当前官方固件**把 waypoint 下水做完（vx 符号 / W2 辨识 / W5 航行）——**下水前不刷任何自编译固件**。
+> 2. 本研究的**编译工作**（clone/装工具链/编 vanilla）不碰 ROV，可随时并行推进。
+> 3. **真正刷机（M2 装机验证）排在 waypoint 下水之后**；刷前先导出参数、确认能一键 `Restore default ArduSub firmware`。
+
 ---
 
 ## 0. 项目组织：两份程序，不是把 Python 搬成 C++
