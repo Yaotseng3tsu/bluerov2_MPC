@@ -30,11 +30,11 @@
 
 > 即 **8 路输出通道 1–8 = Motor1–8**，未反向，PWM 1100–1900、中位 1500。Phase3 改 C++ 时"external[0..7] → Motor1..8"按此对应。
 
-## 待补（M0-b，BlueOS 网页）
-- [ ] `Autopilot Parameters` → 导出完整参数文件（整机备份，存档路径：__________）
-- [x] `Autopilot Firmware` 有 **RESTORE DEFAULT FIRMWARE**（回退路径确认存在）
-- [ ] 记 BlueOS 当前镜像可回退（Local Versions：1.4.2 running / factory / 1.4.1）
+## M0-b（BlueOS 网页）— ✅ 完成
+- [x] `Autopilot Parameters` → 导出完整参数（912 行）→ 入库：[`Submarine-4.1.2-STABLE-20260916-152651.params`](Submarine-4.1.2-STABLE-20260916-152651.params)
+- [x] `Autopilot Firmware` 有 **RESTORE DEFAULT FIRMWARE**（回退路径存在）
+- [x] BlueOS Local Versions 可回退：1.4.2 running / factory `15af2185` / 1.4.1 `a0e86a01`
 
-## 决策点
-- [ ] **匹配当前 4.1.2 fork**（推荐，waypoint 已在此版验证、最小扰动）
-      vs **先升级 ArduSub/BlueOS 再从新版 fork**（代码更新、构建更易，但改动现有可用环境）。默认：匹配 4.1.2。
+## 决策 — ✅ 已定：**版本 A（匹配当前 4.1.2 fork）**
+- 理由：waypoint 已在 4.1.2 验证、最小扰动；目标函数早已存在，fork 无碍。
+- 构建端：Ubuntu 20.04 + GCC 10.2（Bullseye 兼容）。checkout `ArduSub-4.1.2`。
