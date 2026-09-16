@@ -3,18 +3,18 @@
 > W6 现场记录模板。连机/下水当天逐项填写；`[ ]` 勾选，`___` 填值，⬜ 段落待补。
 > 约定：surge 前向 +X；深度向下为正；航向用 ATTITUDE.yaw；距离 = DVL ∫vx·dt。
 
-- **日期**：____-__-__
+- **日期**：2026-09-16
 - **地点/水池**：__________（可用直线距离 ≈ ___ m，水深 ≈ ___ m）
 - **上位机 IP**：192.168.2.188  **DVL IP**：192.168.2.95:16171
 - **在场/监管**：__________
-- **软件版本**：commit `________`（`git rev-parse --short HEAD`）
+- **软件版本**：commit `a96903c`
 
 ---
 
 ## 0. 下水前检查（干测/岸上）
-- [ ] `git pull` 最新；venv 可跑：`python -m waypoint.motion_model --dist 3`（离线自检 PASS）
-- [ ] MAVLink 心跳 OK（飞控 sys1/comp1，autopilot=3）：`python -m src.link --check`
-- [ ] failsafe 已配（`FS_PILOT_INPUT=2 / TIMEOUT=3 / GCS=2`）：`python -m src.check_params`
+- [x] venv 可跑；软件版本 commit `a96903c`
+- [x] MAVLink 心跳 OK（飞控 sys1/comp1，autopilot=3，DISARMED/MANUAL）；深度源 GLOBAL_POSITION_INT @26Hz，噪声±5mm
+- [x] failsafe 已配：FS_PILOT_INPUT=2 / FS_PILOT_TIMEOUT=3 / FS_GCS_ENABLE=2 / FS_LEAK_ENABLE=1
 - [ ] 电量/漏水/系缆检查；桨叶周围清空；急停/断电预案确认
 - [ ] 约定：任何解锁前口头确认现场安全
 
@@ -25,13 +25,14 @@
 
 | 项 | 期望 | 实测 | 判定 |
 |---|---|---|---|
-| 直连 16171 | 能连（扩展未停用） | ___ | [ ] |
-| 更新率 | ≈ 8–15 Hz | ___ Hz | [ ] |
-| 底锁 valid | 贴底 True，altitude>0 | ___ | [ ] |
-| **vx 前进符号** | 前进为正 | 前进时 vx=___ | [ ] |
+| 直连 16171 | 能连（扩展未停用） | ✅ 直连成功（扩展未挡） | [x] |
+| 更新率 | ≈ 8–15 Hz | 气中 ≈4.7 Hz（下水复测） | [~] |
+| 底锁 valid | 贴底 True，altitude>0 | 气中 false/alt=-1（正常） | 待下水 |
+| **vx 前进符号** | 前进为正 | ___（需底锁） | 待下水 |
 
-- **vx 符号结论**：前进为正 → `--vx-sign 1`；前进为负 → **`--vx-sign -1`**（记此处，勿改固件）。
-- 若直连失败（被 BlueOS DVL 扩展独占）→ 退回 MAVLink 读转发速度（见 README）。实际走：⬜
+- **vx 符号结论**：前进为正 → `--vx-sign 1`；前进为负 → **`--vx-sign -1`**（记此处，勿改固件）。⬜ 待下水
+- 直连 16171 成功，**无需停用 BlueOS DVL 扩展**（走直连路线）。
+- 气中更新率 4.7Hz 偏低；A50 无底锁常降速，**下水贴底后复测**（若仍~5Hz，10Hz 环用零阶保持够用）。
 - 备注：⬜
 
 ---

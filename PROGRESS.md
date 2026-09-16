@@ -250,3 +250,9 @@ W1代码/W3/W4/仿真件/W5 全部离线跑通。剩余均需连机: W1真验证
 ### 离线路线 100% 完成
 W1代码 / W2代码 / W3 / W4 / 仿真件 / W5 全部离线跑通并验证。连机那天为纯执行:
 W1真验证(vx符号/直连16171/更新率) → W2采集(surge_sysid_collect --arm)→拟合(surge_sysid_fit --write)→ W5(go_waypoint 直接用 identified 参数) → W6 干测/水下/复盘。
+
+### W6 连机 Day (2026-09-16) — 下水前只读检查 ✅
+- 链路: heartbeat sys1/comp1 autopilot=3 DISARMED/MANUAL; 深度源 GLOBAL_POSITION_INT @26Hz 噪声±5mm。
+- DVL: 直连 16171 成功(无需停用 BlueOS 扩展); 气中 valid=false/alt=-1(正常), 更新率≈4.7Hz(气中偏低, 待下水复测)。
+- failsafe: FS_PILOT_INPUT=2/TIMEOUT=3/GCS=2/LEAK=1 硬兜底充分。
+- 待下水项: vx 前进符号(需底锁)、W2 采集辨识、W5 航行。记录进 waypoint/RESULTS.md。
