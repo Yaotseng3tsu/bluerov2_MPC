@@ -256,3 +256,10 @@ W1真验证(vx符号/直连16171/更新率) → W2采集(surge_sysid_collect --a
 - DVL: 直连 16171 成功(无需停用 BlueOS 扩展); 气中 valid=false/alt=-1(正常), 更新率≈4.7Hz(气中偏低, 待下水复测)。
 - failsafe: FS_PILOT_INPUT=2/TIMEOUT=3/GCS=2/LEAK=1 硬兜底充分。
 - 待下水项: vx 前进符号(需底锁)、W2 采集辨识、W5 航行。记录进 waypoint/RESULTS.md。
+
+### W6 干测 (2026-09-16) 续 — 干测能验的全部完成 ✅
+- 航向传感器: yaw_monitor 手转验证, ATTITUDE.yaw 全圈跟随[-180,+176]跨度356° @20Hz, roll/pitch 实时 → heading_hold 输入可靠。
+- go_waypoint 全链路(不解锁)真机联调: 预热/DESCEND→TURN/ur=+0.30/CSV/超时退出 均正常。
+- 解锁短点动扫描(diag_motor --scan --u0.6 --umax0.6): SERVO 增量全符合标准 Heavy(x[48×4]/y/z/r), 与 Day1 一致 → 指令通路能驱动正确电机。
+- ⚠️ 推力权限偏低: u=0.6→±48µs(满程~12%), 明天下水前建议调高 ArduSub pilot gain 或用 --umax 0.8~1.0。
+- 待明天下水: vx符号、DVL下水更新率、深度闭环、heading_hold极性(+r→yaw增?)、surge绝对前进、W2采集辨识、W5航行。

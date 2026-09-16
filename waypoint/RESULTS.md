@@ -17,8 +17,12 @@
 - [x] 航向传感器 OK（`yaw_monitor` 手转验证：ATTITUDE.yaw 跟随全圈，范围[-180,+176]°跨度356°，@20Hz；roll/pitch 实时响应）→ heading_hold 输入可靠
 - [x] failsafe 已配：FS_PILOT_INPUT=2 / FS_PILOT_TIMEOUT=3 / FS_GCS_ENABLE=2 / FS_LEAK_ENABLE=1
 - [x] `go_waypoint` 全链路(不解锁)真机联调：连接/预热(深度+航向)/DESCEND→TURN 转换/从真实yaw算r指令(ur=+0.30饱和)/CSV/超时安全退出 均正常
+- [x] 解锁短点动扫描(diag_motor --scan --u 0.6 --umax 0.6)：SERVO 增量 x[48×4]/y/z/r 全部符合标准 Heavy，与 Day1 一致 → go_waypoint 指令通路能驱动正确电机
+- [x] 现场：解锁/退出自动上锁正常
 - [ ] 电量/漏水/系缆检查；桨叶周围清空；急停/断电预案确认
-- [ ] 约定：任何解锁前口头确认现场安全
+
+> ⚠️ **推力权限偏低**：u=0.6→±48µs（满程±400 的~12%），u=1.0 推算~±80µs（~20%），ArduSub pilot gain 偏低。
+> **明天下水前建议**：BlueOS/Cockpit 调高 pilot gain；或 W2/W5 用 `--umax 0.8~1.0`。否则 surge/yaw 偏弱偏慢（首测偏安全，但 W2 需能激起可测速度）。
 
 ---
 
