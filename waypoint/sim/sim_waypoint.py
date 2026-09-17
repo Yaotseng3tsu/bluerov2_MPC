@@ -78,6 +78,10 @@ def main() -> int:
     p.add_argument("--dvl-bias", type=float, default=1.0,
                    help="DVL vx 相对真值的比例偏差 (1.0=无偏; 测模型失配)")
     p.add_argument("--no-dvl", action="store_true", help="不启假 DVL (测 DVL 失效降级)")
+    p.add_argument("--alt-glitch", type=float, default=0.0, dest="alt_glitch",
+                   help="注入 DVL 高度跳变的比例 (跳到 2.5m), 复现实测外点")
+    p.add_argument("--yaw-glitch", type=float, default=0.0, dest="yaw_glitch",
+                   help="注入 ATTITUDE 航向跳变的比例 (瞬时 +58°), 复现实测 EKF 跳变")
     p.add_argument("--dvl-dropout", type=float, default=0.0, dest="dvl_dropout",
                    help="注入 DVL 无解帧的比例 (真机实测 ~0.025), 用于验证容错")
     p.add_argument("--bottom", type=float, default=2.0,
@@ -111,6 +115,9 @@ def main() -> int:
             # 真机 DVL 底锁与是否解锁无关: 仿真恒有效 (贴底)
             # 高度 = 池底深度 - 当前深度 (随垂直运动变化, 供 altitude_hold 离线验证)
             alt = max(0.05, args.bottom - depth.z)
+            if args.alt_glitch > 0 and _rnd.random() < args.alt_glitch:
+                return {"vx": surge.v * args.dvl_bias, "vy": 0.0, "vz": depth.w,
+                        "valid": True, "altitude": 2.5}     # 外点
             if args.dvl_dropout > 0 and _rnd.random() < args.dvl_dropout:
                 # 模拟 A50 间歇解算失败: valid=false, altitude=-1
                 return {"vx": 0.0, "vy": 0.0, "vz": 0.0, "valid": False, "altitude": -1.0}
@@ -200,6 +207,9 @@ def main() -> int:
             if now - last_att >= 0.05:
                 last_att = now
                 yw = math.atan2(math.sin(yaw.yaw), math.cos(yaw.yaw))  # wrap ±pi
+                if args.yaw_glitch > 0 and _rnd.random() < args.yaw_glitch:
+                    yw = math.atan2(math.sin(yaw.yaw + math.radians(58)),
+                                    math.cos(yaw.yaw + math.radians(58)))  # 假跳变, 陀螺不变
                 mav.attitude_send(int(el * 1000), 0.0, 0.0, yw, 0.0, 0.0, yaw.rate)
             if now - last_log >= 0.5:
                 last_log = now

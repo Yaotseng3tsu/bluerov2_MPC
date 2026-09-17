@@ -90,6 +90,11 @@ def main(argv=None) -> int:
     ap.add_argument("--heading", type=float, default=None,
                     help="要保持的绝对航向(度);默认=解锁时的当前航向")
     ap.add_argument("--no-yaw", action="store_true", help="关闭航向控制")
+    ap.add_argument("--yaw-jump-dps", type=float, default=120.0, dest="yaw_jump_dps",
+                    help="航向跳变剔除阈值(度/秒)。实测 EKF 会瞬间跳 58°(145°/s),"
+                         "控制器当真后猛打舵把机器人抡起来。用陀螺 yawspeed 交叉校验")
+    ap.add_argument("--yaw-stale", type=float, default=1.5, dest="yaw_stale",
+                    help="航向连续被剔除超过该秒数 → 停用航向控制(不拿坏估计驱动推进器)")
     # --- 阶段/容差 ---
     ap.add_argument("--alt-tol", type=float, default=0.06, dest="alt_tol",
                     help="高度到位容差 (m)")
@@ -141,16 +146,38 @@ def main(argv=None) -> int:
     dvl = DvlStream(ip=args.dvl_ip, port=args.dvl_port).start()
 
     yaw_deg = None
+    yaw_t = None
+    yaw_bad_since = None
+    yaw_frozen = False
 
     def drain_attitude():
-        """抽干 MAVLink, 取最新 ATTITUDE.yaw(飞控融合航向, 比 DVL 的 yaw 不漂)。"""
-        nonlocal yaw_deg
+        """抽干 MAVLink, 取最新 ATTITUDE.yaw, 并剔除非物理的跳变。
+
+        判据: 用同一条报文里的陀螺 yawspeed 交叉校验 —— 角度跳了几十度而陀螺说没转,
+        必是航向估计跳变(EKF 重对准/罗盘干扰), 不是真运动。不剔除的话控制器会
+        对着假误差猛打舵, 把机器人真的抡起来(2026-09-17 实测)。
+        """
+        nonlocal yaw_deg, yaw_t, yaw_bad_since
         import math as _m
         while True:
             m = conn.recv_match(type="ATTITUDE", blocking=False)
             if m is None:
                 break
-            yaw_deg = wrap_deg(_m.degrees(m.yaw))
+            y = wrap_deg(_m.degrees(m.yaw))
+            rate_dps = abs(_m.degrees(m.yawspeed))
+            now = time.monotonic()
+            if yaw_deg is not None and yaw_t is not None:
+                dt = max(1e-3, now - yaw_t)
+                jump = abs(wrap_deg(y - yaw_deg))
+                # 允许量 = 陀螺实测转速 + 阈值余量; 真在转时自然放行
+                allow = max(8.0, (rate_dps + args.yaw_jump_dps) * dt)
+                if jump > allow:
+                    if yaw_bad_since is None:
+                        yaw_bad_since = now
+                    continue          # 丢弃该帧, 沿用上一个好航向
+            yaw_bad_since = None
+            yaw_deg = y
+            yaw_t = now
 
     DATA_DIR.mkdir(exist_ok=True)
     csv_path = DATA_DIR / f"go_forward_{args.label}.csv"
@@ -328,7 +355,14 @@ def main(argv=None) -> int:
             u_r = 0.0
             if not args.no_yaw:
                 drain_attitude()
-                if yaw_deg is not None:
+                if yaw_bad_since is not None and (cyc - yaw_bad_since) > args.yaw_stale:
+                    if not yaw_frozen:
+                        yaw_frozen = True
+                        print(f"[fwd] ⚠ 航向估计持续跳变 >{args.yaw_stale}s → 停用航向控制"
+                              f"(u_r=0), 不用坏估计驱动推进器")
+                elif yaw_bad_since is None:
+                    yaw_frozen = False
+                if yaw_deg is not None and not yaw_frozen:
                     u_r = hh.update(yaw_deg, dt_nom)
 
             stick.send(x=u_x, z=u_z, r=u_r)

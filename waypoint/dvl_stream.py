@@ -67,11 +67,17 @@ class DvlStream:
     """后台线程读取 DVL 速度。start() 启动,latest()/is_fresh() 取值,stop() 关闭。"""
 
     def __init__(self, ip: str | None = None, port: int | None = None,
-                 connect_timeout: float = 5.0):
+                 connect_timeout: float = 5.0, max_alt_rate: float = 1.5,
+                 alt_outlier_accept: int = 5):
         cip, cport = _load_dvl_cfg()
         self.ip = ip or cip
         self.port = port or cport
         self.connect_timeout = connect_timeout
+        # 高度跳变剔除: 机器人不可能在 0.1s 内上下窜 1.7m。实测 A50 偶发把 altitude
+        # 跳到 2.5m/3.3m, 会直接撞上 alt_max 护栏令任务中止。
+        self.max_alt_rate = max_alt_rate            # m/s, 超过即视为跳变
+        self.alt_outlier_accept = alt_outlier_accept  # 连续这么多帧仍偏离 → 认账(真换地形)
+        self._alt_outliers = 0
         self._lock = threading.Lock()
         self._latest = DvlSample()
         # 最近一帧"有效"样本单独保留: A50 会间歇性解算失败(实测 ~2.5% 帧 valid=false/alt=-1,
@@ -139,7 +145,21 @@ class DvlStream:
         with self._lock:
             self._latest = s
             if s.valid and s.altitude > 0:
-                self._latest_valid = s
+                prev = self._latest_valid
+                jump_ok = True
+                if prev.t_mono > 0:
+                    dt = max(1e-3, s.t_mono - prev.t_mono)
+                    if abs(s.altitude - prev.altitude) > self.max_alt_rate * dt + 0.10:
+                        jump_ok = False
+                if jump_ok:
+                    self._alt_outliers = 0
+                    self._latest_valid = s
+                else:
+                    # 跳变: 先丢弃; 若连续多帧都在新值附近, 说明是真的(例如越过台阶)
+                    self._alt_outliers += 1
+                    if self._alt_outliers >= self.alt_outlier_accept:
+                        self._alt_outliers = 0
+                        self._latest_valid = s
             self._n_frames += 1
 
     # ---------------- 取值接口 ----------------
@@ -168,6 +188,12 @@ class DvlStream:
         """
         s = self.latest_valid() if require_valid else self.latest()
         return s.age_s <= max_age_s
+
+    @property
+    def alt_outliers(self) -> int:
+        """当前连续被剔除的高度跳变帧数 (诊断用)。"""
+        with self._lock:
+            return self._alt_outliers
 
     @property
     def connected(self) -> bool:
