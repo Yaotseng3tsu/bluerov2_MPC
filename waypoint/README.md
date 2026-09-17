@@ -83,6 +83,20 @@
 
 深度沿用主项目 [`src/depth_control.py`](../src/depth_control.py)+[`src/plant.py`](../src/plant.py)，不新建。
 
+### DVL 观测工具（移植自 `rl_logger`，实机水中验证过）
+与控制无关、纯观测/记录，**可与 go_waypoint/sysid 同时连 DVL**（已验证 A50 支持多客户端）：
+
+| 文件 | 用途 | 依赖 |
+|---|---|---|
+| `dvl_dashboard.py` | 后台连 DVL→写 CSV + 本地实时网页仪表盘（XY 轨迹/速度/高度/yaw/底锁） | 无（stdlib） |
+| `dvl_traj_log.py` | 无界面：记 velocity + position_local 两路 CSV（`--reset` 归零 DR） | 无 |
+| `plot_dvl_traj.py` | 离线出图（含 velocity 世界系积分对照） | matplotlib/numpy |
+
+CSV 存 `waypoint/data/dvl_data/`，字段与 `rl_logger` 完全一致（两项目数据互通）。
+控制环仍用 [`dvl_stream.py`](dvl_stream.py)（velocity-only、线程安全）——两者读同一 16171 流、各开 socket、互不影响。
+用法：`python waypoint/dvl_dashboard.py --tag <标签> --reset` → 浏览器开 `http://localhost:8080`。
+> 注：`position_local` 的 yaw 无罗盘校正会漂移（~33°/44s）；采正式轨迹前在 BlueOS 扩展打开 `Enable DVL driver` 让飞控航向校正 yaw。短程（3m/~10s）漂移可忽略。
+
 ---
 
 ## 4. 分步骤计划（离线优先；每步执行前先征求你的意见）

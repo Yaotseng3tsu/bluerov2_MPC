@@ -263,3 +263,10 @@ W1真验证(vx符号/直连16171/更新率) → W2采集(surge_sysid_collect --a
 - 解锁短点动扫描(diag_motor --scan --u0.6 --umax0.6): SERVO 增量全符合标准 Heavy(x[48×4]/y/z/r), 与 Day1 一致 → 指令通路能驱动正确电机。
 - ⚠️ 推力权限偏低: u=0.6→±48µs(满程~12%), 明天下水前建议调高 ArduSub pilot gain 或用 --umax 0.8~1.0。
 - 待明天下水: vx符号、DVL下水更新率、深度闭环、heading_hold极性(+r→yaw增?)、surge绝对前进、W2采集辨识、W5航行。
+
+### W6 下水 Day (2026-09-17) — 集成 DVL 观测工具 + 下水 DVL 确认
+- 从 rl_logger 移植(非重写, CSV 字段一致)3 个观测工具到 waypoint/: dvl_dashboard.py(实时网页仪表盘+双CSV)、dvl_traj_log.py(无界面记录)、plot_dvl_traj.py(离线出图)。仅改 outdir→waypoint/data/dvl_data。
+- 实机水中验证: 移植后 dashboard 直连真 DVL OK; 底锁 alt=1.49m/fom=0.0014/valid=True; velocity+position_local 双路都通。
+- **A50 多客户端共存已验证**: dashboard 与控制环 dvl_stream 同时连 16171 都收到数据 → go_waypoint/sysid 运行时可同时开 dashboard 观测。
+- 控制环仍用 dvl_stream(velocity-only 线程安全, 不改); dashboard 是并行观测层。
+- W1 下水复测: DVL 更新率≈4.4Hz(气中水中一致), 底锁确认。
