@@ -408,3 +408,13 @@ W1真验证(vx符号/直连16171/更新率) → W2采集(surge_sysid_collect --a
 - 结论:**WSL + ArduSub-4.1.2 源码 + GCC10.2 工具链 + Navigator 构建链路全部可用**。
 - **M2 尚未完成的另一半 = 装机验证**(把这个 vanilla 刷上 ROV 证明能启动)。受"刷机排在 waypoint 之后 + 用户显式同意 + 物理隔离推进器"门控。
 - M3(改 C++)可在 dev 侧先做、不需刷机;但**不得在 vanilla 装机验证通过前刷改过的固件**。
+
+### direct_thruster M2 装机验证 — ✅ 通过 (2026-09-17, 实机)
+自编译 vanilla ArduSub 经 BlueOS `Upload custom firmware` 装入实机后, 三项被动验证(全程未解锁/未发控制信号)全部通过:
+- **启动**: `fc_info` 拿到飞控 heartbeat sys=1/comp=1/autopilot=3/type=12; 版本 4.1.2 git 2dd0bb7d; **参数与 M0 基线逐项一致**(FRAME_CONFIG=2, SERVO1-8=Motor1-8/1100-1900/TRIM1500)。
+- **遥测**: `yaw_monitor` ATTITUDE 240帧/12s = **20Hz**, 数值实时活动 → IMU/AHRS 正常。
+- **输出**: `servo_monitor` 未解锁下 8 路**恒为 1500** 安全中位。
+- **结论: "电脑编译成功 ≠ ROV 能启动" 这关过了** —— GCC10.2/armhf 选择正确, glibc 兼容无问题。M3 之后若出问题可确定是自己的 C++ 而非构建环境。
+- 新增只读工具: `direct_thruster/servo_monitor.py`(被动看8路输出)、`direct_thruster/fc_link.py`(锁定真飞控心跳)。
+  **修了一个工具 bug**: 原 fc_info 用朴素 wait_heartbeat() 会锁到 BlueOS 服务(sys=0)导致参数全读不出 → 改为只认 autopilot!=INVALID 且 type!=GCS。
+- 未做: 解锁后 8 路响应测试(需拆桨); BlueOS 固件页是否标注自定义(佐证跑的是自编译份)。

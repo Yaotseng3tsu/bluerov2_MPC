@@ -36,7 +36,14 @@
 - **M2 编译 vanilla ✅（2026-09-17，dev 侧门槛通过）**：
   `./waf configure --board navigator --toolchain "$ARM_TC/bin/arm-none-linux-gnueabihf"` + `./waf sub` 成功。
   产物 `build/navigator/bin/ardusub`（1.9 MiB），`file` = **ELF 32-bit LSB ARM EABI5**，加载器 `/lib/ld-linux-armhf.so.3`（armhf，符合 Bullseye）。
-  → 证明 WSL/源码版本/工具链/Navigator 构建链路全部可用。**M2 的"装机验证"半步(需刷机)尚未做**。
+  → 证明 WSL/源码版本/工具链/Navigator 构建链路全部可用。
+- **M2 装机验证 ✅（2026-09-17，已刷入实机并通过）**：经 BlueOS `Upload custom firmware` 装入自编译 vanilla 后：
+  ① `fc_info` → 飞控 heartbeat `sys=1 comp=1 autopilot=3 type=12`，版本 4.1.2/git 2dd0bb7d，**参数与 M0 基线逐项一致**（FRAME_CONFIG=2、SERVO1–8=Motor1–8/1100–1900/TRIM1500）；
+  ② `yaw_monitor` → ATTITUDE **20Hz** 实时活动（IMU/AHRS 正常）；
+  ③ `servo_monitor` → **未解锁 8 路恒为 1500**（输出通道被驱动且安全）。
+  **结论：自编译二进制能在 Navigator 上正常启动运行，glibc/工具链兼容已排除。**
+  新增只读工具：`servo_monitor.py`（被动看 8 路输出）、`fc_link.py`（锁定真飞控心跳，避免锁到 BlueOS 服务 sys=0 导致读不到参数）。
+  ⚠️ 未做：解锁后 8 路响应测试（需拆桨）；BlueOS 固件页是否标注为自定义（用于佐证跑的确是自编译那份）。
 
 ## 5. 下一步（新会话从这里继续）
 
