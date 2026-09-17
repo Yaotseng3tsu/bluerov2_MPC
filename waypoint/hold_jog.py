@@ -32,6 +32,8 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="ALT_HOLD 友好水平点动 (不 arm/不换模式/不 disarm)")
     ap.add_argument("--x", type=float, default=0.0, help="前进 surge")
     ap.add_argument("--y", type=float, default=0.0, help="右移 sway")
+    ap.add_argument("--z", type=float, default=0.0,
+                    help="升沉 heave(+按 sign_z 约定为下潜);ALT_HOLD 下=爬升率指令,验 sign_z 用")
     ap.add_argument("--r", type=float, default=0.0, help="偏航 yaw")
     ap.add_argument("--seconds", type=float, default=5.0)
     ap.add_argument("--umax", type=float, default=0.8, help="覆盖 U_MAX 顶过 ESC 死区")
@@ -51,11 +53,11 @@ def main(argv=None) -> int:
         if armed is False:
             print("[jog] ⚠ 机器人未解锁 → 指令会被忽略、不会动。请先在 Cockpit 解锁+ALT_HOLD。")
             return 2
-        print(f"[jog] 发送 x={args.x} y={args.y} r={args.r} 共 {args.seconds}s ...")
+        print(f"[jog] 发送 x={args.x} y={args.y} z={args.z} r={args.r} 共 {args.seconds}s ...")
         dt = 1.0 / args.hz
         n = max(1, int(args.seconds * args.hz))
         for i in range(n):
-            stick.send(x=args.x, y=args.y, z=0.0, r=args.r)   # z=0 → 中位, 不干预深度
+            stick.send(x=args.x, y=args.y, z=args.z, r=args.r)   # z=0 中位; ALT_HOLD 下 z 为爬升率
             if i % max(1, int(args.hz)) == 0:
                 stick.send_gcs_heartbeat()
             time.sleep(dt)
