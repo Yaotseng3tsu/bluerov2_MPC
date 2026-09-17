@@ -41,17 +41,22 @@ class HeadingHold:
     """航向 PD 控制器。误差与微分均在 wrap 后的角度上计算, 输出归一化 r。"""
 
     def __init__(self, kp: float = 1.0, kd: float = 0.2,
-                 r_limit: float = 0.3, tol_deg: float = 3.0):
+                 r_limit: float = 0.3, tol_deg: float = 3.0,
+                 ki: float = 0.0, i_limit: float = 0.3):
         self.kp = kp                 # per rad
         self.kd = kd                 # per (rad/s)
+        self.ki = ki                 # per (rad·s);对抗恒定扰动力矩(如垂直推力的反扭矩)
+        self.i_limit = i_limit       # |ki*∫e| 上限
         self.r_limit = r_limit
         self.tol_deg = tol_deg
         self.target_deg = 0.0
         self._prev_err_rad: float | None = None
+        self._integ = 0.0
 
     def reset(self, target_deg: float) -> None:
         self.target_deg = wrap_deg(target_deg)
         self._prev_err_rad = None
+        self._integ = 0.0
 
     def error_deg(self, yaw_deg: float) -> float:
         return wrap_deg(self.target_deg - yaw_deg)
@@ -65,8 +70,17 @@ class HeadingHold:
         derr = 0.0 if (self._prev_err_rad is None or dt <= 0) \
             else (err - self._prev_err_rad) / dt
         self._prev_err_rad = err
-        r = self.kp * err + self.kd * derr
-        return max(-self.r_limit, min(self.r_limit, r))
+        # 试探性积分(抗恒定扰动: 负浮力下垂直推力常年产生偏航反扭矩, 纯 PD 必留稳态误差)
+        integ_try = self._integ + err * dt
+        if self.ki > 0:
+            cap = self.i_limit / self.ki
+            integ_try = max(-cap, min(cap, integ_try))
+        r_unsat = self.kp * err + self.ki * integ_try + self.kd * derr
+        r = max(-self.r_limit, min(self.r_limit, r_unsat))
+        # 条件积分抗饱和: 饱和且继续朝同向积分会加剧饱和 → 本步冻结
+        if not (r != r_unsat and err * r_unsat > 0):
+            self._integ = integ_try
+        return r
 
 
 # ------------------------- 仅离线自检用的 yaw 动力学 -------------------------

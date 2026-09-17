@@ -66,12 +66,16 @@ def main(argv=None) -> int:
     ap.add_argument("--alt-slew", type=float, default=0.15, dest="alt_slew")
     ap.add_argument("--z-limit", type=float, default=0.9, dest="z_limit")
     # --- 距离 PID ---
-    ap.add_argument("--x-kp", type=float, default=1.0, dest="x_kp")
+    ap.add_argument("--x-kp", type=float, default=1.5, dest="x_kp")
     ap.add_argument("--x-ki", type=float, default=0.05, dest="x_ki")
     ap.add_argument("--x-kd", type=float, default=1.2, dest="x_kd",
                     help="D 项作用于 DVL 实测 vx(阻尼)")
     ap.add_argument("--x-limit", type=float, default=0.8, dest="x_limit",
                     help="前进指令 |u_x| 限幅")
+    ap.add_argument("--x-ff", type=float, default=0.60, dest="x_ff",
+                    help="前进速度前馈: 维持 --v-cruise 所需的指令。实测 0.08m/s 需 ~0.65;"
+                         "推力有门槛(u_x<0.5 几乎不动), 靠前馈直接跨过去, PID 只修残差。"
+                         "设定值到达目标后自动归零, 以免妨碍刹车")
     ap.add_argument("--max-lag", type=float, default=0.25, dest="max_lag",
                     help="距离设定值最大允许超前实测多少米(节流);越小越跟脚")
     ap.add_argument("--alt-lag", type=float, default=0.20, dest="alt_lag",
@@ -79,7 +83,9 @@ def main(argv=None) -> int:
     # --- 航向 PID (第三路: 抑制上升/前进时的 yaw 偏移) ---
     ap.add_argument("--yaw-kp", type=float, default=1.0, dest="yaw_kp")
     ap.add_argument("--yaw-kd", type=float, default=0.3, dest="yaw_kd")
-    ap.add_argument("--r-limit", type=float, default=0.5, dest="r_limit",
+    ap.add_argument("--yaw-ki", type=float, default=0.20, dest="yaw_ki",
+                    help="航向积分: 抵消垂直推力的恒定反扭矩(纯PD会留稳态误差)")
+    ap.add_argument("--r-limit", type=float, default=0.9, dest="r_limit",
                     help="偏航指令 |u_r| 限幅")
     ap.add_argument("--heading", type=float, default=None,
                     help="要保持的绝对航向(度);默认=解锁时的当前航向")
@@ -126,8 +132,8 @@ def main(argv=None) -> int:
                 i_limit=args.x_limit, u_limit=args.x_limit)
     pid_z.reset(); pid_x.reset()
 
-    hh = HeadingHold(kp=args.yaw_kp, kd=args.yaw_kd,
-                     r_limit=args.r_limit, tol_deg=3.0)
+    hh = HeadingHold(kp=args.yaw_kp, kd=args.yaw_kd, ki=args.yaw_ki,
+                     r_limit=args.r_limit, i_limit=args.r_limit, tol_deg=3.0)
 
     stick = PseudoStick(cfg, endpoint=args.endpoint)
     stick.u_max = float(args.umax)
@@ -157,6 +163,7 @@ def main(argv=None) -> int:
     hold_cnt = 0
     wrong_dir = 0          # 推前进却后退的连续计数 (vx_sign 自检)
     u_x_prev = 0.0
+    ff = 0.0               # surge 速度前馈(平滑变化)
     done_t0 = None
     stop_reason = "完成"
 
@@ -292,18 +299,26 @@ def main(argv=None) -> int:
                 if sp_dist - s <= args.max_lag:
                     st = args.v_cruise * dt_nom
                     sp_dist = min(args.dist, sp_dist + st)
-                u_x = pid_x.compute(sp_dist, s, vx, dt_nom)
+                # 速度前馈: 设定值还在往前推 = 期望以 v_cruise 巡航 → 直接给维持该速度的指令,
+                # 跨过推力门槛(实测 u_x<0.5 几乎不动); 设定值到目标后归零, 让 PID 能反推刹车。
+                ff_tgt = args.x_ff if sp_dist < args.dist - 1e-6 else 0.0
+                ff += 0.05 * (ff_tgt - ff)      # 平滑: 前馈突然归零会像阶跃扰动, 导致反推过头
+                u_x = ff + pid_x.compute(sp_dist, s, vx, dt_nom)
                 if s >= args.dist - args.dist_tol and sp_dist >= args.dist - 1e-6:
                     phase = "DONE"; done_t0 = cyc; u_x = 0.0
                     print(f"[fwd] ✔ 已到距 s={s:.3f}m,停前进,继续定高 {args.done_hold:.0f}s")
 
             else:  # DONE:距离 PID 继续以 dist 为目标 → 滑行超出即反推刹车并稳住位置
                 s += vx * dt_nom
-                u_x = pid_x.compute(args.dist, s, vx, dt_nom)
+                ff += 0.05 * (0.0 - ff)
+                u_x = ff + pid_x.compute(args.dist, s, vx, dt_nom)
                 if cyc - done_t0 >= args.done_hold:
                     break
 
-            u_x = max(-args.x_limit, min(args.x_limit, u_x))
+            u_x_sat = max(-args.x_limit, min(args.x_limit, u_x))
+            if u_x_sat != u_x and pid_x.Ki > 0:
+                pid_x.integ -= (u_x - u_x_sat) / pid_x.Ki
+            u_x = u_x_sat
             u_x_prev = u_x
 
             # --- 航向 PID (第三路) ---
