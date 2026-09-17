@@ -53,7 +53,7 @@ def run(args) -> int:
             m = conn.recv_match(blocking=False)
             if m is None:
                 break
-            d = parse_depth(m)
+            d = parse_depth(m, depth_msg)
             if d is not None:
                 est.feed(d[0], time.monotonic())
                 return d[0]

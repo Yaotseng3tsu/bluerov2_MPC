@@ -314,3 +314,17 @@ W1真验证(vx符号/直连16171/更新率) → W2采集(surge_sysid_collect --a
   **修**: HeadingHold 加积分(ki, 含条件积分抗饱和); go_forward 默认 --yaw-ki 0.20, --r-limit 0.5→0.9。
 - **仿真局限(记录)**: sim 的 surge 在 u=0.6 终速 ~1.2m/s, 真机仅 0.06m/s(差 ~15x);
   垂直亦需 --net-buoy 48 才匹配真机悬停推力。**水平参数只能按真机实测定, SITL 仅验机制。**
+
+### W6 下水 — 发现并修复深度源污染 BUG (用户观察触发)
+- 用户观察: DVL altitude 正确, 但控制用的 depth 数值不对。
+- **实测确认**: parse_depth 同时接受 GLOBAL_POSITION_INT / VFR_HUD / SCALED_PRESSURE2,
+  调用方"收到哪条算哪条", 并未按 config 的 depth_message 过滤。现场实测:
+    GLOBAL_POSITION_INT = +0.866m (真值, 10Hz)
+    VFR_HUD.alt         =  0.000m (字段未填, 10Hz)
+  → 喂给卡尔曼的深度在 0 与真值间每 100ms 跳一次, 深度测量彻底失效。
+- **影响**: 早上 MANUAL 深度 PID 控不住, 我当时归因于增益/sign_z —— **测量本身也是坏的**;
+  "解锁时深度基准跳变 0.844→0.276" 的结论**是错的**, 实为 0↔0.87 交替被滤波平均的假象(已撤回)。
+  altitude 走 DVL 不经此路, 所以一直正确 —— 与用户观察一致。
+- **修复**: parse_depth 增加 allow 参数(按 config depth_message 过滤), 全部 6 处调用点传入。
+- 顺带修: tests/sim_vehicle.py 的 z 极性未随 sign_z=-1 同步(之前只改了 sim_waypoint) → 已对齐真机。
+- 回归: 深度 SITL 正常定深 0.60m; 安全测试 9/9 通过。

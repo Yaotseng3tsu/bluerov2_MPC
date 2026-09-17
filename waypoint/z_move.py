@@ -77,7 +77,7 @@ def main(argv=None) -> int:
             m = conn.recv_match(blocking=False)
             if m is None:
                 break
-            d = parse_depth(m)
+            d = parse_depth(m, depth_msg)
             if d is not None:
                 depth = d[0]
 

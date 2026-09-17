@@ -176,7 +176,7 @@ def _main(argv=None) -> int:
         now = time.monotonic()
         if m is None:
             continue
-        d = parse_depth(m)
+        d = parse_depth(m, depth_msg)
         if d is not None:
             est.feed(d[0], now)
             if now - last_print >= 0.5:

@@ -105,7 +105,7 @@ def run(args) -> int:
                 roll_deg = math.degrees(m.roll)
                 pitch_deg = math.degrees(m.pitch)
             else:
-                d = parse_depth(m)
+                d = parse_depth(m, depth_msg)
                 if d is not None:
                     est.feed(d[0], time.monotonic())
 

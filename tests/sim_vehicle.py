@@ -65,8 +65,12 @@ SIM_PARAMS = {
 
 
 def z_to_u(z_channel: int) -> float:
-    """MANUAL_CONTROL z (0..1000, 500 中位) -> u∈[-1,1], +u 下潜。"""
-    return max(-1.0, min(1.0, (z_channel - 500) / 500.0))
+    """MANUAL_CONTROL z (0..1000, 500 中位) -> 机体 u∈[-1,1], +u 下潜。
+
+    真机实测极性 (2026-09-17): z 通道 **>500 实际是上浮**,config 里用 sign_z=-1 补偿。
+    仿真此处同样取负,端到端(控制器→sign_z→通道→仿真)才与真机一致。
+    """
+    return max(-1.0, min(1.0, -(z_channel - 500) / 500.0))
 
 
 class _Writer:

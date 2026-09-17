@@ -98,9 +98,17 @@ def request_message_interval(mavutil, conn, message_name: str, hz: float) -> Non
     print(f"[link] 已请求 {message_name} @ {hz:.0f} Hz")
 
 
-def parse_depth(msg):
-    """返回 (depth_m, source_field) —— 向下为正。None 表示该消息不含深度。"""
+def parse_depth(msg, allow: str | None = None):
+    """返回 (depth_m, source_field) —— 向下为正。None 表示该消息不含深度。
+
+    allow: 只接受该消息类型 (取自 config 的 connection.depth_message)。
+      **必须传**,否则会同时吃进多个源:实测 VFR_HUD.alt 恒为 0 而
+      GLOBAL_POSITION_INT 才是真值,两者都 10Hz 到达 → 深度在 0 与真值之间反复跳,
+      喂进卡尔曼滤波即失效(2026-09-17 水中实测查出)。
+    """
     t = msg.get_type()
+    if allow is not None and t != allow:
+        return None
     if t == "GLOBAL_POSITION_INT":
         # relative_alt: mm, 水下为负 -> 深度取负号后为正
         return -msg.relative_alt / 1000.0, "relative_alt"
