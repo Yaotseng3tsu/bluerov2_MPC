@@ -89,6 +89,48 @@ class PseudoStick:
               f"comp={self.conn.target_component} arm={'ARMED' if armed else 'DISARMED'}")
         return True
 
+    def detect_rival_manual_control(self, seconds: float = 2.0) -> dict:
+        """监听是否有**其它来源**也在发 MANUAL_CONTROL (典型: Cockpit/QGC 的手柄)。
+
+        飞控只认最后到达的那条 MANUAL_CONTROL。若手柄以 25Hz 刷中位、
+        而我们以 10Hz 发指令, 约 70% 的周期会被手柄的中位覆盖 → 指令被稀释、推不动。
+        (2026-09-17 水中实测: sys255/comp240 以 25Hz 发 z≈490, 导致满推也上不去。)
+
+        返回 {(sys, comp): {"n": 条数, "hz": 频率, "z": [z 样例]}}, 空 dict = 没有竞争源。
+        """
+        mine = (self.conn.source_system, self.conn.source_component)
+        found: dict = {}
+        t_end = time.monotonic() + seconds
+        while time.monotonic() < t_end:
+            m = self.conn.recv_match(type="MANUAL_CONTROL", blocking=True, timeout=0.3)
+            if m is None:
+                continue
+            key = (m.get_srcSystem(), m.get_srcComponent())
+            if key == mine:
+                continue
+            d = found.setdefault(key, {"n": 0, "z": []})
+            d["n"] += 1
+            if len(d["z"]) < 6:
+                d["z"].append(m.z)
+        for d in found.values():
+            d["hz"] = d["n"] / max(seconds, 1e-6)
+        return found
+
+    def warn_if_rival(self, seconds: float = 2.0) -> bool:
+        """检测并打印竞争源警告。返回 True = 存在竞争源。"""
+        rivals = self.detect_rival_manual_control(seconds)
+        if not rivals:
+            return False
+        print("=" * 66)
+        print("⚠️  检测到**其它来源**也在发 MANUAL_CONTROL —— 指令会互相覆盖!")
+        for (s, c), d in sorted(rivals.items()):
+            print(f"    sys{s}/comp{c}: {d['n']} 条 ≈ {d['hz']:.0f} Hz, z 样例={d['z']}")
+        print("    飞控只认最后到达的一条; 对方频率更高时我们的指令大部分会被冲掉,")
+        print("    表现为「满推也推不动 / 感觉在打架」。")
+        print("    → 请先在 Cockpit/QGC 里**断开或停用手柄**, 再跑本脚本。")
+        print("=" * 66)
+        return True
+
     def _norm_to_ch(self, u: float, axis: str) -> int:
         """u∈[-1,1] -> 整型通道值。x/y/r: -1000..1000,0 中位; z: 以 z_neutral 为中位。"""
         u = max(-self.u_max, min(self.u_max, u)) * self.sign[axis]

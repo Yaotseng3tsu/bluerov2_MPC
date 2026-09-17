@@ -340,3 +340,16 @@ W1真验证(vx符号/直连16171/更新率) → W2采集(surge_sysid_collect --a
   altitude_hold / go_forward 的控制环改用 `latest_valid()`(丢帧时沿用上一帧好数据)。
 - 故障注入验证: sim 新增 `--dvl-dropout`; 注入 5%(2倍于实测)无解帧, 任务完整跑完
   (高度误差 0.000m, 距离 1.904/2.00m) —— 修复前会在数秒内中止。
+
+### W6 下水 — 【根因】Cockpit 手柄与脚本抢 MANUAL_CONTROL
+- 现象: `z_move --dir up --u 0.8` 推不动, 但用户轻推 Cockpit 手柄机器人就上升。
+- **实测证据**(只读监听链路 12s):
+    MANUAL_CONTROL 来自 sys255/comp240: 300 条 ≈ **25 Hz**, z=475~498(中位微抖) ← Cockpit 手柄
+  我们的脚本 10Hz。飞控只认**最后到达**的一条 → 约 70% 周期被手柄的中位覆盖,
+  指令被稀释, 表现为"满推也推不动"。
+- **推翻先前判断**: "u_z=-1.0 满推仍下沉" **不是硬件故障**(进水/缆拖拽/桨缠绕),
+  而是指令冲突。早先 altitude_hold 能稳在 0.8m, 是当时手柄未发; 之后手柄活跃即全面失效。
+  用户从一开始反馈的"感觉在打架"是对的。
+- **修复(代码侧)**: PseudoStick 新增 `detect_rival_manual_control()` / `warn_if_rival()`,
+  z_move / altitude_hold / go_forward 解锁前自动检测并告警(可选择中止)。
+- **操作规程**: 跑本项目脚本前必须在 Cockpit/QGC **断开或停用手柄**。

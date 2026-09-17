@@ -184,6 +184,9 @@ def main(argv=None) -> int:
               f"距离PID kp{args.x_kp}/ki{args.x_ki}/kd{args.x_kd} 限幅{args.x_limit} | "
               f"护栏 max_dist={max_dist:.2f}m vx_sign={args.vx_sign:+.0f}")
 
+        if stick.warn_if_rival() and not args.yes:
+            if input("[fwd] 仍要继续? 输入 yes: ").strip().lower() != "yes":
+                return 0
         if not args.yes:
             ans = input("[fwd] ⚠ 即将解锁并做定高前进,确认前方无障碍/池壁余量足够? 输入 yes: ")
             if ans.strip().lower() != "yes":

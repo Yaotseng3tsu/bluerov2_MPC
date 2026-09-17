@@ -100,6 +100,9 @@ def main(argv=None) -> int:
         print(f"[z] 起始深度={depth:+.3f}m  方向={args.dir}  u_z={u_z:+.2f} "
               f"→ MANUAL_CONTROL z={z_ch} (500=中位)  U_MAX={stick.u_max}")
 
+        if stick.warn_if_rival() and not args.yes:
+            if input("[z] 仍要继续? 输入 yes: ").strip().lower() != "yes":
+                return 0
         if not args.yes:
             ans = input(f"[z] ⚠ 即将解锁并在 {args.mode} 下{'上浮' if args.dir=='up' else '下潜'}"
                         f" {args.seconds}s,确认安全? 输入 yes: ")

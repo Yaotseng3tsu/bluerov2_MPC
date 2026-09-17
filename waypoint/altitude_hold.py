@@ -109,6 +109,9 @@ def main(argv=None) -> int:
               f"Kp={args.kp} Ki={args.ki} Kd={args.kd} u_limit={args.u_limit} "
               f"u_bias={args.u_bias}  U_MAX={stick.u_max}")
 
+        if stick.warn_if_rival() and not args.yes:
+            if input("[alt] 仍要继续? 输入 yes: ").strip().lower() != "yes":
+                return 0
         if not args.yes:
             ans = input(f"[alt] ⚠ 即将解锁并在 {args.mode} 下做高度闭环,确认安全? 输入 yes: ")
             if ans.strip().lower() != "yes":
