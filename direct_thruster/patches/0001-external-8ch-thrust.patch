@@ -1,0 +1,322 @@
+diff --git a/ArduSub/ArduSub.cpp b/ArduSub/ArduSub.cpp
+index b00b89a69b..aae77e5c18 100644
+--- a/ArduSub/ArduSub.cpp
++++ b/ArduSub/ArduSub.cpp
+@@ -146,6 +146,9 @@ void Sub::fifty_hz_loop()
+     // check pilot input failsafe
+     failsafe_pilot_input_check();
+ 
++    // direct_thruster fork: external thrust command watchdog
++    failsafe_ext_thrust_check();
++
+     failsafe_crash_check();
+ 
+     failsafe_ekf_check();
+diff --git a/ArduSub/GCS_Mavlink.cpp b/ArduSub/GCS_Mavlink.cpp
+index 475f9a6f53..5a55a555fe 100644
+--- a/ArduSub/GCS_Mavlink.cpp
++++ b/ArduSub/GCS_Mavlink.cpp
+@@ -573,7 +573,54 @@ void GCS_MAVLINK_Sub::handleMessage(const mavlink_message_t &msg)
+         break;
+     }
+ 
+-    
++    // direct_thruster fork: external per-thruster control.
++    // Private convention: group_mlx == 1 carries Motor1..8 as normalised thrust in
++    // controls[0..7]. The standard group 0 (roll/pitch/yaw/throttle) is deliberately
++    // NOT accepted here, so this cannot be triggered by a generic GCS.
++    case MAVLINK_MSG_ID_SET_ACTUATOR_CONTROL_TARGET: {
++        if (msg.sysid != sub.g.sysid_my_gcs) {
++            break;    // only accept control from our gcs
++        }
++        mavlink_set_actuator_control_target_t packet;
++        mavlink_msg_set_actuator_control_target_decode(&msg, &packet);
++
++        if (packet.target_system != sub.g.sysid_this_mav) {
++            break;    // only accept control aimed at us
++        }
++        if (packet.group_mlx != 1) {
++            break;    // not our private motor group
++        }
++        if (!sub.motors.external_thrust_enabled()) {
++            break;    // MOT_EXT_ENABLE is off
++        }
++
++        // validate the whole frame before accepting any of it: a partially applied
++        // command would drive some thrusters from a frame we already distrust
++        bool frame_ok = true;
++        for (uint8_t i = 0; i < 8; i++) {
++            if (!isfinite(packet.controls[i]) || fabsf(packet.controls[i]) > 1.0f) {
++                frame_ok = false;
++                break;
++            }
++        }
++        if (!frame_ok) {
++            break;
++        }
++
++        // full-width buffer: AP_MOTORS_MAX_NUM_MOTORS > 8, the remainder stays zero
++        float thrust[AP_MOTORS_MAX_NUM_MOTORS] {};
++        for (uint8_t i = 0; i < 8; i++) {
++            thrust[i] = packet.controls[i];
++        }
++        sub.motors.set_external_thrust(thrust, AP_HAL::millis());
++
++        // a valid external command IS our pilot input while in external control, so the
++        // existing pilot-input failsafe stays armed rather than being disabled
++        sub.failsafe.last_pilot_input_ms = AP_HAL::millis();
++        gcs().sysid_myggcs_seen(AP_HAL::millis());
++        break;
++    }
++
+     case MAVLINK_MSG_ID_SET_ATTITUDE_TARGET: { // MAV ID: 82
+         // decode packet
+         mavlink_set_attitude_target_t packet;
+diff --git a/ArduSub/Sub.h b/ArduSub/Sub.h
+index feacce65f0..6f57dbdb3d 100644
+--- a/ArduSub/Sub.h
++++ b/ArduSub/Sub.h
+@@ -237,10 +237,11 @@ private:
+         uint8_t internal_temperature : 1; // true if temperature is over threshold
+         uint8_t crash                : 1; // true if we are crashed
+         uint8_t sensor_health        : 1; // true if at least one sensor has triggered a failsafe (currently only used for depth in depth enabled modes)
++        uint8_t ext_thrust           : 1; // true if external thrust commands went stale (direct_thruster fork)
+     } failsafe;
+ 
+     bool any_failsafe_triggered() const {
+-        return (failsafe.pilot_input || battery.has_failsafed() || failsafe.gcs || failsafe.ekf || failsafe.terrain);
++        return (failsafe.pilot_input || battery.has_failsafed() || failsafe.gcs || failsafe.ekf || failsafe.terrain || failsafe.ext_thrust);
+     }
+ 
+     // sensor health for logging
+@@ -516,6 +517,7 @@ private:
+     void handle_battery_failsafe(const char* type_str, const int8_t action);
+     void failsafe_gcs_check();
+     void failsafe_pilot_input_check(void);
++    void failsafe_ext_thrust_check(void);   // direct_thruster fork
+     void set_neutral_controls(void);
+     void failsafe_terrain_check();
+     void failsafe_terrain_set_status(bool data_ok);
+diff --git a/ArduSub/failsafe.cpp b/ArduSub/failsafe.cpp
+index 454373fcbe..089fbb4bad 100644
+--- a/ArduSub/failsafe.cpp
++++ b/ArduSub/failsafe.cpp
+@@ -198,6 +198,45 @@ void Sub::failsafe_pilot_input_check()
+ #endif
+ }
+ 
++// direct_thruster fork: watchdog on the external per-thruster command stream.
++//
++// Deliberately different from the pilot-input failsafe above:
++//   - it is NOT compiled out on SITL, so the behaviour can be tested in simulation
++//   - the action is fixed and strict: neutral, disarm, and LATCH the fault
++// Control is never silently handed back to the mixer and the last command is never
++// held. Clearing MOT_EXT_ENABLE releases the latch, so re-entering external control
++// is always an explicit operator action.
++void Sub::failsafe_ext_thrust_check()
++{
++    // external control switched off: release the latch so it can be re-enabled
++    if (!motors.external_thrust_enabled()) {
++        motors.clear_external_fault();
++        failsafe.ext_thrust = false;
++        return;
++    }
++
++    if (!motors.external_thrust_timed_out()) {
++        failsafe.ext_thrust = false;
++        return;
++    }
++
++    if (failsafe.ext_thrust) {
++        return; // only act once
++    }
++
++    failsafe.ext_thrust = true;
++
++    // drop the stale command and refuse further ones until explicitly re-enabled
++    motors.clear_external_thrust();
++    motors.latch_external_fault();
++
++    AP::logger().Write_Error(LogErrorSubsystem::PILOT_INPUT, LogErrorCode::FAILSAFE_OCCURRED);
++    gcs().send_text(MAV_SEVERITY_CRITICAL, "Lost external thrust commands");
++
++    set_neutral_controls();
++    arming.disarm(AP_Arming::Method::PILOT_INPUT_FAILSAFE);
++}
++
+ // Internal pressure failsafe check
+ // Check if the internal pressure of the watertight electronics enclosure
+ // has exceeded the maximum specified by the FS_PRESS_MAX parameter
+diff --git a/ArduSub/system.cpp b/ArduSub/system.cpp
+index 8d57bdadea..6df9da18c3 100644
+--- a/ArduSub/system.cpp
++++ b/ArduSub/system.cpp
+@@ -171,6 +171,11 @@ void Sub::init_ardupilot()
+ 
+     ins.set_log_raw_bit(MASK_LOG_IMU_RAW);
+ 
++    // direct_thruster fork: build marker. Version and git hash are identical to the
++    // upstream tag this is built from, so this banner is the only reliable way to tell
++    // at a glance which binary is actually running after a firmware upload.
++    gcs().send_text(MAV_SEVERITY_INFO, "EXT-THRUSTER build: external 8ch thrust available");
++
+     // flag that initialisation has completed
+     ap.initialised = true;
+ }
+diff --git a/libraries/AP_Motors/AP_Motors6DOF.cpp b/libraries/AP_Motors/AP_Motors6DOF.cpp
+index 003215eb9f..b7dff90677 100644
+--- a/libraries/AP_Motors/AP_Motors6DOF.cpp
++++ b/libraries/AP_Motors/AP_Motors6DOF.cpp
+@@ -118,6 +118,21 @@ const AP_Param::GroupInfo AP_Motors6DOF::var_info[] = {
+     // @User: Standard
+     AP_GROUPINFO("12_DIRECTION", 13, AP_Motors6DOF, _motor_reverse[11], 1),
+ 
++    // @Param: EXT_ENABLE
++    // @DisplayName: External thruster control enable
++    // @Description: Enable direct external per-thruster control. When enabled, SET_ACTUATOR_CONTROL_TARGET messages with group_mlx=1 drive Motor1..8 directly, bypassing the thrust allocation mixer. Motor direction parameters and the armed/spool gating still apply.
++    // @Values: 0:Disabled,1:Enabled
++    // @User: Advanced
++    AP_GROUPINFO("EXT_ENABLE", 14, AP_Motors6DOF, _ext_enable, 0),
++
++    // @Param: EXT_TMOUT
++    // @DisplayName: External thrust command timeout
++    // @Description: External thrust commands are treated as stale after this long. On timeout the motors return to neutral and the external thrust failsafe is raised.
++    // @Units: ms
++    // @Range: 50 2000
++    // @User: Advanced
++    AP_GROUPINFO("EXT_TMOUT", 15, AP_Motors6DOF, _ext_timeout_ms, 500),
++
+     AP_GROUPEND
+ };
+ 
+@@ -287,8 +302,76 @@ float AP_Motors6DOF::get_current_limit_max_throttle()
+ // includes new scaling stability patch
+ // TODO pull code that is common to output_armed_not_stabilizing into helper functions
+ // ToDo calculate headroom for rpy to be added for stabilization during full throttle/forward/lateral commands
++// ---- external thruster control (direct_thruster fork) -------------------------
++// Accept a validated 8-channel normalised thrust command. Refused while disabled
++// or while a fault is latched, so a stale/illegal stream can never resume control
++// without an explicit re-enable.
++void AP_Motors6DOF::set_external_thrust(const float thrust[AP_MOTORS_MAX_NUM_MOTORS], uint32_t now_ms)
++{
++    if (_ext_enable == 0 || _ext_fault_latched) {
++        return;
++    }
++    for (uint8_t i = 0; i < AP_MOTORS_MAX_NUM_MOTORS; i++) {
++        _ext_thrust[i] = constrain_float(thrust[i], -1.0f, 1.0f);
++    }
++    _ext_last_ms = now_ms;
++    _ext_have_cmd = true;
++}
++
++void AP_Motors6DOF::clear_external_thrust()
++{
++    for (uint8_t i = 0; i < AP_MOTORS_MAX_NUM_MOTORS; i++) {
++        _ext_thrust[i] = 0.0f;
++    }
++    _ext_have_cmd = false;
++    _ext_last_ms = 0;
++}
++
++bool AP_Motors6DOF::external_thrust_active() const
++{
++    if (_ext_enable == 0 || _ext_fault_latched || !_ext_have_cmd) {
++        return false;
++    }
++    return (AP_HAL::millis() - _ext_last_ms) < (uint32_t)_ext_timeout_ms;
++}
++
++bool AP_Motors6DOF::external_thrust_timed_out() const
++{
++    if (_ext_enable == 0 || !_ext_have_cmd) {
++        return false;
++    }
++    return (AP_HAL::millis() - _ext_last_ms) >= (uint32_t)_ext_timeout_ms;
++}
++
++// Fill _thrust_rpyt_out[] straight from the external command, replacing the mixer.
++// Everything downstream is unchanged: output_to_motors() still forces 1500 unless
++// the spool state is running, then applies calc_thrust_to_pwm() and rc_write().
++void AP_Motors6DOF::output_external_thrusters()
++{
++    for (uint8_t i = 0; i < AP_MOTORS_MAX_NUM_MOTORS; i++) {
++        if (motor_enabled[i]) {
++            // mirrors the final line of the mixers: honour per-motor direction, then clamp
++            _thrust_rpyt_out[i] = constrain_float(_motor_reverse[i] * _ext_thrust[i], -1.0f, 1.0f);
++        }
++    }
++    // mixer saturation flags are meaningless under direct control
++    limit.roll = false;
++    limit.pitch = false;
++    limit.yaw = false;
++    limit.throttle_lower = false;
++    limit.throttle_upper = false;
++}
++
+ void AP_Motors6DOF::output_armed_stabilizing()
+ {
++    // direct_thruster: bypass the allocation mixer entirely when external control is live.
++    // Deliberately done here (not in the MAVLink handler calling rc_write()) so that the
++    // arm/spool gating in output_to_motors() still holds every output at 1500 when disarmed.
++    if (external_thrust_active()) {
++        output_external_thrusters();
++        return;
++    }
++
+     if ((sub_frame_t)_active_frame_class == SUB_FRAME_VECTORED) {
+         output_armed_stabilizing_vectored();
+     } else if ((sub_frame_t)_active_frame_class == SUB_FRAME_VECTORED_6DOF) {
+diff --git a/libraries/AP_Motors/AP_Motors6DOF.h b/libraries/AP_Motors/AP_Motors6DOF.h
+index 1e5d1ee7bd..8e06d71d5c 100644
+--- a/libraries/AP_Motors/AP_Motors6DOF.h
++++ b/libraries/AP_Motors/AP_Motors6DOF.h
+@@ -58,6 +58,28 @@ public:
+     // Sub assumes vehicles are neutrally buoyant
+     virtual float get_throttle_hover() const override { return 0.5f; }
+ 
++    // ---- external thruster control (direct_thruster fork) ----------------------
++    // Direct per-thruster command, bypassing the thrust allocation mixer.
++    // thrust[i] is normalised [-1,1] and maps to Motor(i+1).
++    void set_external_thrust(const float thrust[AP_MOTORS_MAX_NUM_MOTORS], uint32_t now_ms);
++
++    // true when external control should drive the motors:
++    // enabled by param, at least one valid command received, not stale, no latched fault
++    bool external_thrust_active() const;
++
++    // true when external control is enabled and a command was received but has gone stale
++    bool external_thrust_timed_out() const;
++
++    // zero the external command buffer (on disarm / leaving external control)
++    void clear_external_thrust();
++
++    bool external_thrust_enabled() const { return _ext_enable != 0; }
++
++    // latched fault: once set, external commands are refused until explicitly cleared
++    void latch_external_fault() { _ext_fault_latched = true; }
++    void clear_external_fault() { _ext_fault_latched = false; }
++    bool external_fault_latched() const { return _ext_fault_latched; }
++
+     // var_info for holding Parameter information
+     static const struct AP_Param::GroupInfo        var_info[];
+ 
+@@ -72,9 +94,20 @@ protected:
+     void output_armed_stabilizing_vectored();
+     void output_armed_stabilizing_vectored_6dof();
+ 
++    // external thruster control: fill _thrust_rpyt_out[] directly from _ext_thrust[]
++    void output_external_thrusters();
++
+     // Parameters
+     AP_Int8             _motor_reverse[AP_MOTORS_MAX_NUM_MOTORS];
+     AP_Float            _forwardVerticalCouplingFactor;
++    AP_Int8             _ext_enable;        // MOT_EXT_ENABLE
++    AP_Int16            _ext_timeout_ms;    // MOT_EXT_TMOUT
++
++    // external thruster state
++    float               _ext_thrust[AP_MOTORS_MAX_NUM_MOTORS] {};
++    uint32_t            _ext_last_ms = 0;
++    bool                _ext_have_cmd = false;
++    bool                _ext_fault_latched = false;
+ 
+     float               _forward_factor[AP_MOTORS_MAX_NUM_MOTORS]; // each motors contribution to forward/backward
+     float               _lateral_factor[AP_MOTORS_MAX_NUM_MOTORS];  // each motors contribution to lateral (left/right)

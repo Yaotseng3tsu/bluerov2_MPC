@@ -425,3 +425,23 @@ W1真验证(vx符号/直连16171/更新率) → W2采集(surge_sysid_collect --a
 - **客观判据 = autopilot uptime 归零**(`fc_info` 已加打印)。重启后 uptime≈0 → 确认进程已换成磁盘上那份。
 - 结论: 重启后复测 heartbeat/版本/参数全部正常 → **M2 装机验证坐实**。重启前那次验证不作数。
 - 教训记入流程: 以后每次刷机, **装完必 RESTART + 看 uptime**; M3 起在固件里加开机 STATUSTEXT 标记, 一眼确认跑的是哪份。
+
+### direct_thruster M3 — C++ 改动完成并编译通过 (2026-09-17, dev 侧, 未刷机)
+在 WSL 的 `ardupilot-external`(分支 `external-thrusters`) 实现"外部 8 路直控", 7 文件 +214 行, 编译通过(1.9MiB ARM EABI5)。diff 存 `direct_thruster/patches/0001-external-8ch-thrust.patch`。
+
+**设计(读真实 4.1.2 源码后, 对原计划有三处修正)**:
+- **切入点在派发器顶部** `AP_Motors6DOF::output_armed_stabilizing()` 最上面拦截 → **三个混控函数一行未动**(你的 Heavy 实际走 `output_armed_stabilizing_vectored_6dof()`)。
+- **只写 `_thrust_rpyt_out[]`, 绝不直接 rc_write** → 下游 `output_to_motors()` 的 spool 门控仍在, **未解锁时输出被硬写 1500**, "未解锁发非零命令不动桨"是结构性保证而非靠 if。
+- **必须自己补 `_motor_reverse[i]` + 限幅**(混控最后一行做的事), 否则 `MOT_n_DIRECTION` 会静默失效。
+- **`get_current_limit_max_throttle()` 在 4.1.2 里恒返回 1.0(空壳)** → 原计划担心的"丢了总电流限制"在此版本无实质内容, 不需处理。
+
+**接口**: `SET_ACTUATOR_CONTROL_TARGET` + 私有约定 `group_mlx=1` = Motor1..8, `controls[i]∈[-1,1]`。
+校验: sysid==SYSID_MYGCS / target 匹配 / group==1 / MOT_EXT_ENABLE 开 / 8 路全部 finite 且在 [-1,1] → **整帧拒收, 不部分采纳**。
+**新参数**: `MOT_EXT_ENABLE`(0/1, 默认0) `MOT_EXT_TMOUT`(ms, 默认500)。
+
+**failsafe**:
+- 合法外部命令会刷新 `last_pilot_input_ms` → **保留原 pilot-input failsafe 而不是关掉它**(否则外部模式下不发 MANUAL_CONTROL 会被判"Lost manual control"而 disarm)。
+- 新增 `failsafe_ext_thrust_check()`(50Hz): 超时 → 归中位 + **disarm** + **锁存故障**; 不恢复原 mixer、不沿用上一条命令; 清 `MOT_EXT_ENABLE` 才解锁存。**故意不做 SITL 编译屏蔽**(原 pilot 检查有 `#if != SITL`, 在 SITL 验不出来)。
+- 开机 STATUSTEXT `"EXT-THRUSTER build..."` → 解决"版本号/hash 与官方完全一致、分不清跑的是哪份"的问题。
+
+**未做**: 尚未刷机(等时机); 验收四项(未解锁发非零/单路独立/看门狗/非法值) 待 SITL → 断桨干测 → 水下。
