@@ -60,6 +60,27 @@ def get_version(conn) -> None:
     print("  ⚠ 未取到 AUTOPILOT_VERSION (可在 BlueOS Autopilot Firmware 页看版本)")
 
 
+def print_uptime(conn) -> None:
+    """打印飞控开机时长 —— 判断 autopilot 是否刚重启(重启后 uptime 归零)。"""
+    t_end = time.monotonic() + 3.0
+    while time.monotonic() < t_end:
+        msg = conn.recv_match(type=["SYSTEM_TIME", "ATTITUDE", "SCALED_IMU2"],
+                              blocking=True, timeout=1.0)
+        if msg is None:
+            continue
+        tb = getattr(msg, "time_boot_ms", None)
+        if tb is None:
+            continue
+        s = tb / 1000.0
+        if s < 120:
+            tag = "← 刚重启过(uptime 很短)"
+        else:
+            tag = "← 已运行较久, 若刚点过 RESTART 说明没真正重启"
+        print(f"  autopilot uptime = {s:.1f} s ({s/60:.1f} min)  {tag}")
+        return
+    print("  (未取到 uptime)")
+
+
 def read_param(conn, name: str, timeout: float = 1.5):
     conn.mav.param_request_read_send(conn.target_system, conn.target_component,
                                      name.encode("ascii"), -1)
@@ -83,6 +104,7 @@ def main() -> int:
         return 2
     print("\n=== ArduSub 版本 ===")
     get_version(conn)
+    print_uptime(conn)
 
     print("\n=== 推进器相关参数 (备份用) ===")
     vals = {}
