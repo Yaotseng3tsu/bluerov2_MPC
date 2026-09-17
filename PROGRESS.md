@@ -418,3 +418,10 @@ W1真验证(vx符号/直连16171/更新率) → W2采集(surge_sysid_collect --a
 - 新增只读工具: `direct_thruster/servo_monitor.py`(被动看8路输出)、`direct_thruster/fc_link.py`(锁定真飞控心跳)。
   **修了一个工具 bug**: 原 fc_info 用朴素 wait_heartbeat() 会锁到 BlueOS 服务(sys=0)导致参数全读不出 → 改为只认 autopilot!=INVALID 且 type!=GCS。
 - 未做: 解锁后 8 路响应测试(需拆桨); BlueOS 固件页是否标注自定义(佐证跑的是自编译份)。
+
+#### M2 订正: 装机验证须在 RESTART AUTOPILOT 之后才算数
+- **用户发现的关键漏洞**: BlueOS "Successfully installed new firmware" 只说明**文件写入磁盘**, 正在跑的 ArduSub **进程仍是旧的**, 直到点 `RESTART AUTOPILOT`。
+- 更麻烦的是**版本号无法分辨新旧**: 我们编的是同一个 tag, 自编译版同样报 `4.1.2 (STABLE)` / git `2dd0bb7d`, 连 BlueOS 页面显示都一样。
+- **客观判据 = autopilot uptime 归零**(`fc_info` 已加打印)。重启后 uptime≈0 → 确认进程已换成磁盘上那份。
+- 结论: 重启后复测 heartbeat/版本/参数全部正常 → **M2 装机验证坐实**。重启前那次验证不作数。
+- 教训记入流程: 以后每次刷机, **装完必 RESTART + 看 uptime**; M3 起在固件里加开机 STATUSTEXT 标记, 一眼确认跑的是哪份。
