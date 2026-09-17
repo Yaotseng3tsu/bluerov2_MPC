@@ -48,11 +48,10 @@ def main(argv=None) -> int:
         if not stick.wait_heartbeat(float(cfg["connection"].get("heartbeat_timeout_s", 10))):
             return 1
         armed = stick.is_armed(timeout=2.0)
-        print(f"[jog] U_MAX={stick.u_max}  当前 armed={armed}  "
-              f"(本脚本不 arm/不换模式/不 disarm; z 恒中位交给 ALT_HOLD 定深)")
+        print(f"[jog] U_MAX={stick.u_max}  飞控 armed={armed}  "
+              f"(本脚本不 arm/不换模式/不 disarm)")
         if armed is False:
-            print("[jog] ⚠ 机器人未解锁 → 指令会被忽略、不会动。请先在 Cockpit 解锁+ALT_HOLD。")
-            return 2
+            print("[jog] ⚠ 飞控回报未解锁——若你确认已在 Cockpit 解锁+ALT_HOLD,可忽略(仍会发指令)。")
         print(f"[jog] 发送 x={args.x} y={args.y} z={args.z} r={args.r} 共 {args.seconds}s ...")
         dt = 1.0 / args.hz
         n = max(1, int(args.seconds * args.hz))

@@ -173,10 +173,16 @@ class PseudoStick:
         return None
 
     def is_armed(self, timeout: float = 2.0) -> bool | None:
-        hb = self.conn.recv_match(type="HEARTBEAT", blocking=True, timeout=timeout)
-        if hb is None:
-            return None
-        return bool(hb.base_mode & MAV_MODE_FLAG_SAFETY_ARMED)
+        """只认飞控(锁定的 target)心跳;BlueOS 组件心跳的 armed 字段无意义,须过滤。"""
+        t_end = time.monotonic() + timeout
+        while time.monotonic() < t_end:
+            hb = self.conn.recv_match(type="HEARTBEAT", blocking=True, timeout=timeout)
+            if hb is None:
+                continue
+            if (hb.get_srcSystem() == self.conn.target_system
+                    and hb.get_srcComponent() == self.conn.target_component):
+                return bool(hb.base_mode & MAV_MODE_FLAG_SAFETY_ARMED)
+        return None
 
     def arm(self, force: bool = False, timeout: float = 5.0) -> bool:
         """解锁。返回是否成功。会持续发 GCS 心跳。"""
