@@ -77,10 +77,10 @@ def read_param(conn, name: str, timeout: float = 1.5):
 
 
 def main() -> int:
-    print(f"[fc_info] 连接 {ENDPOINT} (只读) ...")
-    conn = mavutil.mavlink_connection(ENDPOINT, dialect="ardupilotmega")
-    conn.wait_heartbeat()
-    print(f"[fc_info] heartbeat OK  sys={conn.target_system} comp={conn.target_component}")
+    from fc_link import connect_fc
+    conn = connect_fc(ENDPOINT)
+    if conn is None:
+        return 2
     print("\n=== ArduSub 版本 ===")
     get_version(conn)
 

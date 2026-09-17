@@ -34,10 +34,10 @@ def main() -> int:
     ap.add_argument("--seconds", type=float, default=12.0)
     args = ap.parse_args()
 
-    print(f"[servo] 连接 {args.endpoint} (只读) ...")
-    conn = mavutil.mavlink_connection(args.endpoint, dialect="ardupilotmega")
-    conn.wait_heartbeat()
-    print(f"[servo] heartbeat OK  sys={conn.target_system} comp={conn.target_component}")
+    from fc_link import connect_fc
+    conn = connect_fc(args.endpoint)
+    if conn is None:
+        return 2
 
     # 只请求遥测流, 不发任何控制指令
     sid = mavutil.mavlink.MAVLINK_MSG_ID_SERVO_OUTPUT_RAW
