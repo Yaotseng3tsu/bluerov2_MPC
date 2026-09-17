@@ -278,3 +278,14 @@ W1真验证(vx符号/直连16171/更新率) → W2采集(surge_sysid_collect --a
 - 新增 `waypoint/altitude_hold.py`: **高度闭环**(PID + DVL altitude + 伪手柄)。反馈用离底高度而非压力深度;把 -alt 当深度复用已验证 PID;`--u-bias` 前馈补负浮力;DVL 丢底锁/超龄/越界即停;退出交回 ALT_HOLD 保持 armed。
 - 仿真同步: sim_waypoint 的 z 解码改为匹配真机极性, 并让假 DVL 高度 = bottom - depth、新增 --net-buoy 模拟负浮力。
 - SITL 验证(负浮力 5N): 高度 1.0→目标 1.2 收敛至 1.202m(误差 -0.002m), 稳态 u_z≈-0.065。
+
+### W6 下水 — 定高前进 go_forward (高度PID + 距离PID 双闭环)
+- 新增 `waypoint/go_forward.py`: 阶段 HOLD(稳高度)→ADVANCE(高度+距离同时控)→DONE(反推刹车并稳住位置)。
+  - 高度 z: 复用 altitude_hold 那套(-alt 当深度 / u_bias 前馈 / slew / 抗饱和)。
+  - 距离 x: s=∫vx·dt, u_x=Kp(sp-s)+Ki∫e-Kd·vx —— **D 项直接用 DVL 实测 vx,免数值微分**;
+    距离设定值按 --v-cruise 匀速斜坡 → 匀速前进不冲过头。
+- SITL: 高度末态误差 +1mm; 距离最初超调 0.24m(DONE 阶段把 u_x 清零→靠惯性滑行),
+  改为 **DONE 仍跑距离 PID(反推刹车+位置保持)** 后超调降到 0.075m。
+- **安全: vx 符号自检**(--vx-sign 若反, s 会往负走、max_dist 护栏永不触发 → 会一路撞墙)。
+  加了 s<-0.3 与"推前进却持续后退"两道拦截; 故障注入(--vx-sign -1)验证在 s=-0.38 正确中止。
+- 待真机: vx_sign 仍未实测(此前增益太低没动), 建议 dist 0.5→1.2→2.0 渐进。
