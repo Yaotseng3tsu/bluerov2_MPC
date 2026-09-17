@@ -401,3 +401,10 @@ W1真验证(vx符号/直连16171/更新率) → W2采集(surge_sysid_collect --a
 **待办**: `waypoint/RESULTS.md` §3 现场数据表仍待回填(实测下潜/距离/航向/深度数值)。
 
 **另一条线 direct_thruster**(独立, 见 `direct_thruster/HANDOFF.md`): 修改+编译 ArduSub 独立控 8 桨。进行到 **M1**(WSL2 Ubuntu-22.04 + ArduSub-4.1.2 clone[与实机 hash 一致] + 手动装构建依赖), 卡点=验证 GCC10.2 交叉工具链 → 下一步 M2 编译 vanilla。刷机须排在 waypoint 收尾之后。
+
+### direct_thruster M2 编译门槛 — ✅ 通过 (2026-09-17, dev 侧)
+- `./waf configure --board navigator --toolchain $ARM_TC/bin/arm-none-linux-gnueabihf` + `./waf sub` 编译成功。
+- 产物 `build/navigator/bin/ardusub` 1.9 MiB;`file` = **ELF 32-bit LSB ARM EABI5**,加载器 `/lib/ld-linux-armhf.so.3`(armhf,符合 Bullseye BlueOS)。
+- 结论:**WSL + ArduSub-4.1.2 源码 + GCC10.2 工具链 + Navigator 构建链路全部可用**。
+- **M2 尚未完成的另一半 = 装机验证**(把这个 vanilla 刷上 ROV 证明能启动)。受"刷机排在 waypoint 之后 + 用户显式同意 + 物理隔离推进器"门控。
+- M3(改 C++)可在 dev 侧先做、不需刷机;但**不得在 vanilla 装机验证通过前刷改过的固件**。

@@ -32,25 +32,25 @@
   - ✅ **构建依赖手动装**（官方 `install-prereqs-ubuntu.sh` 在 22.04 上报 Python2 包缺失 → **跳过**，只装编译必需）：
     `sudo apt install build-essential ccache g++ gawk make wget pkg-config python3 python3-dev python3-pip python3-setuptools python3-wheel libtool libxml2-dev libxslt1-dev`
     + `pip install --user empy==3.3.4 pymavlink future lxml pexpect`（**empy 必须 3.3.x，别用 4.x**）。
-  - ⏳ **当前卡点 = M1-e2**：正在下载/验证 **GCC 10.2 交叉工具链**
-    `~/toolchains/gcc-arm-10.2-2020.11-x86_64-arm-none-linux-gnueabihf`（32-bit armhf，对 Bullseye）。
-    下一动作：`.../bin/arm-none-linux-gnueabihf-gcc --version` 应显示 10.2。
+  - ✅ **GCC 10.2 交叉工具链**就位（`~/toolchains/gcc-arm-10.2-2020.11-x86_64-arm-none-linux-gnueabihf`）。
+- **M2 编译 vanilla ✅（2026-09-17，dev 侧门槛通过）**：
+  `./waf configure --board navigator --toolchain "$ARM_TC/bin/arm-none-linux-gnueabihf"` + `./waf sub` 成功。
+  产物 `build/navigator/bin/ardusub`（1.9 MiB），`file` = **ELF 32-bit LSB ARM EABI5**，加载器 `/lib/ld-linux-armhf.so.3`（armhf，符合 Bullseye）。
+  → 证明 WSL/源码版本/工具链/Navigator 构建链路全部可用。**M2 的"装机验证"半步(需刷机)尚未做**。
 
 ## 5. 下一步（新会话从这里继续）
-### M1-e2 收尾
-- 确认工具链解压完成、`arm-none-linux-gnueabihf-gcc --version` = 10.2。若 ARM 下载链接失效，换镜像。
 
-### M2 · 编译 vanilla（**不改一行代码，门槛，勿跳**）
-在 `~/rov-dev/ardupilot-external`：
-```bash
-export ARM_TC="$HOME/toolchains/gcc-arm-10.2-2020.11-x86_64-arm-none-linux-gnueabihf"
-./waf configure --board navigator --toolchain "$ARM_TC/bin/arm-none-linux-gnueabihf"
-./waf sub -j4
-ls -lh build/navigator/bin/ardusub
-file build/navigator/bin/ardusub          # 期望: ELF 32-bit LSB ... ARM ...
-```
-- configure/编译报错是**预期的趟坑**（老分支×新系统/py3.10）：缺模块补模块、报错逐个判读。常见：empy 版本、waf 的 python 兼容、submodule 缺失。
-- 编译成功后 → **（在 waypoint 下水之后）** 经 BlueOS `Autopilot Firmware → Upload custom firmware` 装机，验证 heartbeat/IMU/depth/8 路输出正常 + 能 `Restore default`。**"电脑编译成功 ≠ ROV 能启动"**（GCC10.2 就是为此选的）。
+### M2 收尾 · 装机验证 vanilla（**需刷机 → 受时序规则与用户同意双重门控**）
+编译已通过；剩下的是把这个未改动的 vanilla 装上 ROV，证明**它真能在机器上启动**。
+- **前置**：waypoint 工作到安全暂停点；用户显式同意；**未解锁 + 物理隔离推进器动力/断开 ESC 信号**；参数已备份（已入库）。
+- 步骤：BlueOS `Autopilot Firmware → Upload custom firmware` → 选 WSL 里的 `build/navigator/bin/ardusub`
+  （Windows 侧路径形如 `\\wsl$\Ubuntu-22.04\home\yaots\rov-dev\ardupilot-external\build\navigator\bin\ardusub`）→ Install。
+- 验收：heartbeat 恢复、参数可读、IMU/depth 遥测正常、8 路输出正常；并确认能 `Restore default firmware` 回官方。
+- **"电脑编译成功 ≠ ROV 能启动"**（GCC10.2 正是为此选的）——这一步过了，才排除掉"环境问题"，之后出错就只可能是自己的 C++。
+
+### M3 · 改 C++（**可在 dev 侧先做，不需刷机**）
+见 README §3：`AP_Motors6DOF.{h,cpp}`（在 `output_armed_stabilizing()` 用外部 8 路命令替换 `_thrust_rpyt_out[]`，**保留电机反向/总电流限制**）、`GCS_MAVLink_Sub.cpp`（收 `SET_ACTUATOR_CONTROL_TARGET`，自定义 `group_mlx=1`=Motor1–8）、`failsafe.cpp`（外部命令超时→归中+上锁+锁存）。
+⚠️ **不要在 vanilla 装机验证通过之前刷"改过的"固件**——否则起不来时无法区分是环境还是自己的代码。
 
 ### M3+ 才改 C++
 见 README §3：改 `AP_Motors6DOF.{h,cpp}`（在 `output_armed_stabilizing()` 用外部 8 路命令替换 `_thrust_rpyt_out[]`，**保留电机反向/总电流限制**）、`GCS_MAVLink_Sub.cpp`（收 `SET_ACTUATOR_CONTROL_TARGET`，自定义 `group_mlx=1`=Motor1–8）、`failsafe.cpp`（外部命令超时→归中+上锁+锁存）。
