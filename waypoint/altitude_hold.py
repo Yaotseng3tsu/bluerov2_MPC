@@ -54,6 +54,9 @@ def main(argv=None) -> int:
                     help="PID 输出/积分限幅")
     ap.add_argument("--u-bias", type=float, default=0.0, dest="u_bias",
                     help="前馈偏置(负=恒定上推力,补负浮力);建议先试 -0.5")
+    ap.add_argument("--slew", type=float, default=0.2,
+                    help="设定值爬升限速 (m/s, 0=关闭)。大阶跃时把目标做成斜坡,"
+                         "避免推力饱和导致超调")
     ap.add_argument("--umax", type=float, default=1.0, help="覆盖 U_MAX")
     ap.add_argument("--alt-min", type=float, default=0.25, dest="alt_min",
                     help="低于此高度即停(防撞底)")
@@ -118,6 +121,8 @@ def main(argv=None) -> int:
             return 2
 
         t0 = time.monotonic()
+        sp = dvl.latest().altitude      # 斜坡起点 = 当前高度
+        alt_guard = (sp >= args.alt_min + 0.05)   # 起步就在安全高度以上则立即武装
         last_print = 0.0
         stop_reason = "完成"
         while True:
@@ -142,7 +147,11 @@ def main(argv=None) -> int:
             alt_prev, t_prev = alt, cyc
 
             # --- 安全边界 ---
-            if alt < args.alt_min:
+            # alt_min 保护"先武装再生效": 允许从池底起浮(起始 alt 可能本就低于 alt_min),
+            # 一旦升到安全高度以上才开始防撞底, 否则起浮瞬间就会被误判中止。
+            if not alt_guard and alt >= args.alt_min + 0.05:
+                alt_guard = True
+            if alt_guard and alt < args.alt_min:
                 stick.send_neutral()
                 stop_reason = f"低于 alt_min ({alt:.2f}<{args.alt_min})"
                 break
@@ -151,21 +160,31 @@ def main(argv=None) -> int:
                 stop_reason = f"高于 alt_max ({alt:.2f}>{args.alt_max})"
                 break
 
+            # --- 设定值限速: 大阶跃做成斜坡, 避免推力饱和 → 超调 ---
+            if args.slew > 0:
+                step = args.slew * dt_nom
+                sp += max(-step, min(step, args.target - sp))
+            else:
+                sp = args.target
+
             # --- PID: 把"高度"取负当作"深度"用, 复用已验证的深度 PID (+u=下潜) ---
-            dt_c = dt_nom
-            u_pid = pid.compute(-args.target, -alt, -alt_rate, dt_c)
-            u_z = max(-1.0, min(1.0, args.u_bias + u_pid))
+            u_pid = pid.compute(-sp, -alt, -alt_rate, dt_nom)
+            u_raw = args.u_bias + u_pid
+            u_z = max(-1.0, min(1.0, u_raw))
+            # --- 抗饱和(back-calculation): 钳位发生在 PID 之外, 需把多余量退回积分 ---
+            if u_z != u_raw and pid.Ki > 0:
+                pid.integ -= (u_raw - u_z) / pid.Ki
             stick.send(z=u_z)
             if int(el * hz) % int(hz) == 0:
                 stick.send_gcs_heartbeat()
 
             err = args.target - alt
-            rows.append([round(el, 3), round(args.target, 3), round(alt, 4),
+            rows.append([round(el, 3), round(args.target, 3), round(sp, 4), round(alt, 4),
                          round(alt_rate, 4), round(u_pid, 4), round(u_z, 4)])
             if el - last_print >= 0.5:
                 last_print = el
-                print(f"  t={el:5.1f} alt={alt:+.3f} 目标={args.target:.2f} "
-                      f"err={err:+.3f} rate={alt_rate:+.3f} u_pid={u_pid:+.3f} u_z={u_z:+.3f}")
+                print(f"  t={el:5.1f} alt={alt:+.3f} sp={sp:.3f}/{args.target:.2f} "
+                      f"err={err:+.3f} rate={alt_rate:+.3f} u_z={u_z:+.3f}")
 
             sl = dt_nom - (time.monotonic() - cyc)
             if sl > 0:
@@ -174,8 +193,8 @@ def main(argv=None) -> int:
         print(f"[alt] 结束 ({stop_reason})。")
         if rows:
             last = rows[-1]
-            print(f"[alt] 末高度={last[2]:.3f}m (目标 {args.target:.2f}, "
-                  f"误差 {args.target - last[2]:+.3f}m)  末 u_z={last[5]:+.3f}")
+            print(f"[alt] 末高度={last[3]:.3f}m (目标 {args.target:.2f}, "
+                  f"误差 {args.target - last[3]:+.3f}m)  末 u_z={last[6]:+.3f}")
         return 0
     except KeyboardInterrupt:
         print("\n[alt] 用户中断 → 回中位")
@@ -203,7 +222,7 @@ def main(argv=None) -> int:
         stick.close()
         with open(csv_path, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
-            w.writerow(["t", "target", "alt", "alt_rate", "u_pid", "u_z"])
+            w.writerow(["t", "target", "sp", "alt", "alt_rate", "u_pid", "u_z"])
             w.writerows(rows)
         print(f"[alt] 已保存 {csv_path} ({len(rows)} 行)")
 
