@@ -385,3 +385,19 @@ W1真验证(vx符号/直连16171/更新率) → W2采集(surge_sysid_collect --a
   ③ 仍保留 `--yaw-stale` 超时停用航向控制作为兜底。
 - 故障注入(t=20s 起永久 +105° 参考平移 + 尖刺5% + 高度外点3% + 丢帧2.5%):
   平移瞬间 |u_r|max=0.00、|yaw_err|max=0.0°(**无打舵**), 任务完成(高度-6mm, 距离0.980/1.00)。
+
+---
+
+## 现状快照 (2026-09-17) — W6 下水实测后
+**主用脚本演进**(实机定高作业更实用): `go_forward.py`(高度PID + 距离PID + 航向PID 三闭环, 定高前进; 设定值节流) · `z_move.py`(垂直直推, 定 sign_z) · `altitude_hold.py`(DVL 离底高度定高)。新增 DVL 观测工具 `dvl_dashboard.py`/`dvl_traj_log.py`/`plot_dvl_traj.py` · `hold_jog.py`。`go_waypoint.py` 仍在(点到点 4DOF)。
+
+**关键实机结论**:
+- **sign_z = -1**(命令上浮→深度减小, z_move 二次确认); 负浮力机器人需 `--u-bias` 恒定上推力才能悬停。
+- 池内定高用 **DVL altitude**(非压力深度, 不受水面基准漂移); 航向用 **ATTITUDE.yaw**(DVL 的 yaw 无罗盘会漂)。
+- **设定值节流**: 实测 surge ~0.06 m/s < v_cruise 0.15 → 不节流则设定值超前 1.18m、u_x 长期饱和退化成开关控制; 节流后滞后 <0.1m。
+
+**已修复(均 commit)**: 深度源污染(VFR_HUD 恒0 混入 parse_depth) · DVL 假丢底锁(is_fresh 被坏帧误判) · Cockpit 手柄抢 MANUAL_CONTROL(加竞争源告警) · 航向跳变→急旋(陀螺交叉校验剔除) · 航向参考系平移→平移目标而非打舵追 · heading 积分项 ki(抗垂直-偏航耦合恒定扰动) · go_forward `--hold-timeout` 40s。
+
+**待办**: `waypoint/RESULTS.md` §3 现场数据表仍待回填(实测下潜/距离/航向/深度数值)。
+
+**另一条线 direct_thruster**(独立, 见 `direct_thruster/HANDOFF.md`): 修改+编译 ArduSub 独立控 8 桨。进行到 **M1**(WSL2 Ubuntu-22.04 + ArduSub-4.1.2 clone[与实机 hash 一致] + 手动装构建依赖), 卡点=验证 GCC10.2 交叉工具链 → 下一步 M2 编译 vanilla。刷机须排在 waypoint 收尾之后。
