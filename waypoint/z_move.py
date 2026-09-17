@@ -151,16 +151,18 @@ def main(argv=None) -> int:
         delta = d_end - d_start
         if abs(delta) < 0.03:
             print("[z] ⚠ 深度几乎没变 → 推力不足/被卡住,先查增益或加大 --u。")
-        elif args.dir == "up":
-            if delta < 0:
-                print("[z] ✅ 命令上浮 → 深度变小 = 真上浮。**sign_z 正确(保持 +1)**")
-            else:
-                print("[z] ❌ 命令上浮 → 深度反而变大(下沉)。**sign_z 反了 → config 改 sign_z: -1**")
         else:
-            if delta > 0:
-                print("[z] ✅ 命令下潜 → 深度变大 = 真下潜。**sign_z 正确(保持 +1)**")
+            # 判读必须基于**当前配置值**, 不能硬编码 ±1:
+            # 配置已是 -1 时若提示"保持 +1", 照做反而会把方向改错。
+            cur = int(cfg.get("manual_control", {}).get("sign_z", 1))
+            ok = (delta < 0) if args.dir == "up" else (delta > 0)
+            act = "上浮" if delta < 0 else "下沉"
+            if ok:
+                print(f"[z] ✅ 命令{'上浮' if args.dir=='up' else '下潜'} → 实际{act}。"
+                      f"**方向正确, 保持当前 sign_z = {cur:+d}**")
             else:
-                print("[z] ❌ 命令下潜 → 深度反而变小(上浮)。**sign_z 反了 → config 改 sign_z: -1**")
+                print(f"[z] ❌ 命令{'上浮' if args.dir=='up' else '下潜'} → 实际{act}(反了)。"
+                      f"**config 的 sign_z 需从 {cur:+d} 改为 {-cur:+d}**")
         return 0
     except KeyboardInterrupt:
         print("\n[z] 用户中断。")

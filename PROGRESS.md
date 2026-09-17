@@ -353,3 +353,11 @@ W1真验证(vx符号/直连16171/更新率) → W2采集(surge_sysid_collect --a
 - **修复(代码侧)**: PseudoStick 新增 `detect_rival_manual_control()` / `warn_if_rival()`,
   z_move / altitude_hold / go_forward 解锁前自动检测并告警(可选择中止)。
 - **操作规程**: 跑本项目脚本前必须在 Cockpit/QGC **断开或停用手柄**。
+
+### W6 下水 — 手柄冲突解除后复测: z_move / go_forward 均正常
+- 断开 Cockpit 手柄后重跑 `z_move --dir up --u 0.8 --seconds 6`:
+  深度 0.883 → 0.405 m(**6s 上浮 0.478m, ≈0.085 m/s**), z_ch=900 全程稳定。
+  → 之前"z_move 不上升而 go_forward 能上升"同样是**手柄抢信号**, 两脚本无差异(走同一 send 路径)。
+- **sign_z = -1 得到二次确认**(命令上浮 → 深度变小)。
+- 修 z_move 判读文案 BUG: 原文硬编码"保持 +1", 但 config 已是 -1, 照做会把方向改反;
+  改为读取当前 `manual_control.sign_z` 并提示"保持当前值 / 需从 X 改为 -X"。
