@@ -103,7 +103,7 @@ def main(argv=None) -> int:
                     help="高度到位容差 (m)")
     ap.add_argument("--hold-settle", type=float, default=2.0, dest="hold_settle",
                     help="高度连续在容差内多少秒才开始前进")
-    ap.add_argument("--hold-timeout", type=float, default=25.0, dest="hold_timeout",
+    ap.add_argument("--hold-timeout", type=float, default=40.0, dest="hold_timeout",
                     help="等高度稳定的最长时间 (s)")
     ap.add_argument("--dist-tol", type=float, default=0.05, dest="dist_tol")
     ap.add_argument("--done-hold", type=float, default=4.0, dest="done_hold",
