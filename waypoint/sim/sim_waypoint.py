@@ -77,6 +77,10 @@ def main() -> int:
     p.add_argument("--dvl-bias", type=float, default=1.0,
                    help="DVL vx 相对真值的比例偏差 (1.0=无偏; 测模型失配)")
     p.add_argument("--no-dvl", action="store_true", help="不启假 DVL (测 DVL 失效降级)")
+    p.add_argument("--bottom", type=float, default=2.0,
+                   help="池底所在深度 (m); DVL 高度 = bottom - depth")
+    p.add_argument("--net-buoy", type=float, default=None,
+                   help="覆盖净浮力 N (负浮力用正值, 下潜为正系);模拟重力>浮力")
     args = p.parse_args()
 
     host, port = args.ctrl_addr.split(":")
@@ -88,7 +92,10 @@ def main() -> int:
     mav = mav2.MAVLink(_Writer(sock, dest), srcSystem=1, srcComponent=1)
 
     surge = SurgePlant(SurgeParams.from_yaml())
-    depth = DepthPlant(DepthParams.from_yaml(), z0=args.z0)
+    _dp = DepthParams.from_yaml()
+    if args.net_buoy is not None:
+        _dp.net_buoy_N = float(args.net_buoy)   # 正=下沉(重力>浮力)
+    depth = DepthPlant(_dp, z0=args.z0)
     yaw = YawPlant(YawParams(), yaw_deg=args.yaw0)
 
     state = {"armed": False, "mode": MANUAL_MODE}
@@ -98,8 +105,10 @@ def main() -> int:
     if not args.no_dvl:
         def vel():
             # 真机 DVL 底锁与是否解锁无关: 仿真恒有效 (贴底)
+            # 高度 = 池底深度 - 当前深度 (随垂直运动变化, 供 altitude_hold 离线验证)
+            alt = max(0.05, args.bottom - depth.z)
             return {"vx": surge.v * args.dvl_bias, "vy": 0.0, "vz": depth.w,
-                    "valid": True, "altitude": 2.0}
+                    "valid": True, "altitude": alt}
         dvl = FakeDvl(vel, port=args.dvl_port, rate_hz=10.0).start()
 
     def send_heartbeat():
@@ -147,7 +156,9 @@ def main() -> int:
                     t = m.get_type()
                     if t == "MANUAL_CONTROL":
                         ux = max(-1.0, min(1.0, m.x / 1000.0))
-                        uz = max(-1.0, min(1.0, (m.z - 500) / 500.0))
+                        # 真机实测极性(2026-09-17): MANUAL_CONTROL z 通道 >500 = 上浮。
+                        # 配置里 sign_z=-1 负责补偿, 故仿真此处同样取负, 端到端才与真机一致。
+                        uz = max(-1.0, min(1.0, -(m.z - 500) / 500.0))
                         ur = max(-1.0, min(1.0, m.r / 1000.0))
                         last_cmd_t = now
                     elif t == "COMMAND_LONG" and m.command == MAV_CMD_COMPONENT_ARM_DISARM:

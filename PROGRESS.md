@@ -270,3 +270,11 @@ W1真验证(vx符号/直连16171/更新率) → W2采集(surge_sysid_collect --a
 - **A50 多客户端共存已验证**: dashboard 与控制环 dvl_stream 同时连 16171 都收到数据 → go_waypoint/sysid 运行时可同时开 dashboard 观测。
 - 控制环仍用 dvl_stream(velocity-only 线程安全, 不改); dashboard 是并行观测层。
 - W1 下水复测: DVL 更新率≈4.4Hz(气中水中一致), 底锁确认。
+
+### W6 下水 (2026-09-17) — sign_z 定案 + 高度控制
+- **sign_z 水中实测为反**: z_move 上浮/下潜颠倒 → `config/vehicle.yaml` 改 `sign_z: -1`(Day1 挂起的问题今天定掉)。
+- **增益根因**: JS_GAIN_DEFAULT=0.2 / JS_GAIN_MAX=0.5(顶格才 50%)→ 改为 0.8 / 1.0;实测 u≈0.8 可快速上浮。
+- 新增 `waypoint/z_move.py`: z 轴上浮/下潜(MANUAL 直接推力)+ 实时深度 + 自动判读 sign_z;退出交回 ALT_HOLD 不 disarm。
+- 新增 `waypoint/altitude_hold.py`: **高度闭环**(PID + DVL altitude + 伪手柄)。反馈用离底高度而非压力深度;把 -alt 当深度复用已验证 PID;`--u-bias` 前馈补负浮力;DVL 丢底锁/超龄/越界即停;退出交回 ALT_HOLD 保持 armed。
+- 仿真同步: sim_waypoint 的 z 解码改为匹配真机极性, 并让假 DVL 高度 = bottom - depth、新增 --net-buoy 模拟负浮力。
+- SITL 验证(负浮力 5N): 高度 1.0→目标 1.2 收敛至 1.202m(误差 -0.002m), 稳态 u_z≈-0.065。
