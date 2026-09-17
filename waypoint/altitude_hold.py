@@ -104,7 +104,7 @@ def main(argv=None) -> int:
         if not dvl.is_fresh(args.max_age):
             print("[alt] ❌ 无 DVL 有效高度(无底锁),不能做高度控制。")
             return 1
-        alt0 = dvl.latest().altitude
+        alt0 = dvl.latest_valid().altitude
         print(f"[alt] 底锁 OK  当前高度={alt0:.3f}m  目标={args.target:.3f}m  "
               f"Kp={args.kp} Ki={args.ki} Kd={args.kd} u_limit={args.u_limit} "
               f"u_bias={args.u_bias}  U_MAX={stick.u_max}")
@@ -121,7 +121,7 @@ def main(argv=None) -> int:
             return 2
 
         t0 = time.monotonic()
-        sp = dvl.latest().altitude      # 斜坡起点 = 当前高度
+        sp = dvl.latest_valid().altitude      # 斜坡起点 = 当前高度
         alt_guard = (sp >= args.alt_min + 0.05)   # 起步就在安全高度以上则立即武装
         last_print = 0.0
         stop_reason = "完成"
@@ -136,7 +136,7 @@ def main(argv=None) -> int:
                 stick.send_neutral()
                 stop_reason = "DVL 丢底锁/超龄"
                 break
-            s = dvl.latest()
+            s = dvl.latest_valid()   # 用最近有效帧, 容忍瞬时丢帧
             alt = s.altitude
 
             # 高度变化率(数值微分 + 低通)

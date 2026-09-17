@@ -328,3 +328,15 @@ W1真验证(vx符号/直连16171/更新率) → W2采集(surge_sysid_collect --a
 - **修复**: parse_depth 增加 allow 参数(按 config depth_message 过滤), 全部 6 处调用点传入。
 - 顺带修: tests/sim_vehicle.py 的 z 极性未随 sign_z=-1 同步(之前只改了 sim_waypoint) → 已对齐真机。
 - 回归: 深度 SITL 正常定深 0.60m; 安全测试 9/9 通过。
+
+### W6 下水 — "DVL 丢底锁/超龄" 误中止的根因与修复
+- 现象: ff2m 第二次运行 2.9s 即以 "DVL 丢底锁/超龄" 结束。
+- **表层**: 机器人已沉到 alt≈0.09-0.19m 并剧烈跳动, 接近 A50 最小工作高度(~0.05-0.1m);
+  且 u_z 满推 -1.0 在底部搅起气泡/泥沙, 正打在换能器下方 → 间歇解算失败。
+- **深层(代码缺陷)**: dashboard 原始记录 11562 帧中 **286 帧(2.5%) valid=false/alt=-1**。
+  而 `is_fresh()` 只看**最新那一帧**, 10Hz 控制环几秒内必然撞上一帧坏数据 → 误判丢底锁中止。
+- **修复**: DvlStream 单独保留 `_latest_valid`(最近一帧有效样本), 新增 `latest_valid()`;
+  `is_fresh()` 判据改为"最近一次**有效**帧的龄期 <= max_age", 容忍瞬时丢帧;
+  altitude_hold / go_forward 的控制环改用 `latest_valid()`(丢帧时沿用上一帧好数据)。
+- 故障注入验证: sim 新增 `--dvl-dropout`; 注入 5%(2倍于实测)无解帧, 任务完整跑完
+  (高度误差 0.000m, 距离 1.904/2.00m) —— 修复前会在数秒内中止。

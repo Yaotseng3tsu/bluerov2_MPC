@@ -74,6 +74,9 @@ class DvlStream:
         self.connect_timeout = connect_timeout
         self._lock = threading.Lock()
         self._latest = DvlSample()
+        # 最近一帧"有效"样本单独保留: A50 会间歇性解算失败(实测 ~2.5% 帧 valid=false/alt=-1,
+        # 贴底 + 满推搅起气泡泥沙时更频繁)。只看最新帧会被单帧坏数据误判为丢底锁。
+        self._latest_valid = DvlSample()
         self._run = False
         self._thread: threading.Thread | None = None
         self._n_frames = 0          # 累计解析到的 velocity 帧数
@@ -135,6 +138,8 @@ class DvlStream:
         )
         with self._lock:
             self._latest = s
+            if s.valid and s.altitude > 0:
+                self._latest_valid = s
             self._n_frames += 1
 
     # ---------------- 取值接口 ----------------
@@ -144,12 +149,25 @@ class DvlStream:
             s = self._latest
         return replace(s, age_s=(time.monotonic() - s.t_mono) if s.t_mono else float("inf"))
 
+    def latest_valid(self) -> DvlSample:
+        """最近一帧**有效**样本 (valid 且 altitude>0)。age_s = 距今多久。
+
+        控制环应当用它而不是 latest():这样单帧解算失败时沿用上一帧好数据,
+        不会因为 ~2.5% 的坏帧而抖动或误停。
+        """
+        with self._lock:
+            s = self._latest_valid
+        return replace(s, age_s=(time.monotonic() - s.t_mono) if s.t_mono else float("inf"))
+
     def is_fresh(self, max_age_s: float = 0.5, require_valid: bool = True) -> bool:
-        """数据是否新鲜且可用 (供安全降级判据:不新鲜/丢底锁 → 停车)。"""
-        s = self.latest()
-        if s.age_s > max_age_s:
-            return False
-        return (s.valid and s.altitude > 0) if require_valid else True
+        """数据是否可用。
+
+        require_valid 时判据 = "最近一次**有效**帧的龄期 <= max_age_s",
+        而不是"最新那一帧恰好有效" —— 后者会被单帧坏数据误判成丢底锁
+        (实测 2.5% 帧无解, 10Hz 控制环几秒内必然撞上, 导致任务被误中止)。
+        """
+        s = self.latest_valid() if require_valid else self.latest()
+        return s.age_s <= max_age_s
 
     @property
     def connected(self) -> bool:

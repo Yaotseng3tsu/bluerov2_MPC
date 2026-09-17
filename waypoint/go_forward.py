@@ -177,7 +177,7 @@ def main(argv=None) -> int:
         if not dvl.is_fresh(args.max_age):
             print("[fwd] ❌ 无 DVL 有效数据(无底锁),高度与距离都不可用。")
             return 1
-        alt0 = dvl.latest().altitude
+        alt0 = dvl.latest_valid().altitude
         print(f"[fwd] 底锁 OK  当前高度={alt0:.3f}m → 目标 {args.alt:.2f}m;"
               f" 然后前进 {args.dist:.2f}m @ {args.v_cruise:.2f}m/s")
         print(f"[fwd] 高度PID kp{args.alt_kp}/ki{args.alt_ki}/kd{args.alt_kd} bias{args.u_bias} | "
@@ -213,7 +213,7 @@ def main(argv=None) -> int:
                 print(f"[fwd] 航向锁定 = {hh.target_deg:.1f}° (当前 {yaw_deg:.1f}°)")
 
         t0 = time.monotonic()
-        sp_alt = dvl.latest().altitude
+        sp_alt = dvl.latest_valid().altitude
         sp_dist = 0.0
         alt_guard = (sp_alt >= args.alt_min + 0.05)
         last_print = 0.0
@@ -227,7 +227,7 @@ def main(argv=None) -> int:
             # --- DVL ---
             if not dvl.is_fresh(args.max_age):
                 stick.send_neutral(); stop_reason = "DVL 丢底锁/超龄"; break
-            d = dvl.latest()
+            d = dvl.latest_valid()   # 用最近有效帧, 容忍瞬时丢帧
             alt = d.altitude
             vx = d.vx * args.vx_sign
 

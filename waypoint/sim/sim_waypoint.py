@@ -21,6 +21,7 @@ import argparse
 import errno
 import math
 import os
+import random as _random
 import socket
 import sys
 import time
@@ -77,6 +78,8 @@ def main() -> int:
     p.add_argument("--dvl-bias", type=float, default=1.0,
                    help="DVL vx 相对真值的比例偏差 (1.0=无偏; 测模型失配)")
     p.add_argument("--no-dvl", action="store_true", help="不启假 DVL (测 DVL 失效降级)")
+    p.add_argument("--dvl-dropout", type=float, default=0.0, dest="dvl_dropout",
+                   help="注入 DVL 无解帧的比例 (真机实测 ~0.025), 用于验证容错")
     p.add_argument("--bottom", type=float, default=2.0,
                    help="池底所在深度 (m); DVL 高度 = bottom - depth")
     p.add_argument("--net-buoy", type=float, default=None,
@@ -91,6 +94,7 @@ def main() -> int:
     sock.setblocking(False)
     mav = mav2.MAVLink(_Writer(sock, dest), srcSystem=1, srcComponent=1)
 
+    _rnd = _random.Random(1234)
     surge = SurgePlant(SurgeParams.from_yaml())
     _dp = DepthParams.from_yaml()
     if args.net_buoy is not None:
@@ -107,6 +111,9 @@ def main() -> int:
             # 真机 DVL 底锁与是否解锁无关: 仿真恒有效 (贴底)
             # 高度 = 池底深度 - 当前深度 (随垂直运动变化, 供 altitude_hold 离线验证)
             alt = max(0.05, args.bottom - depth.z)
+            if args.dvl_dropout > 0 and _rnd.random() < args.dvl_dropout:
+                # 模拟 A50 间歇解算失败: valid=false, altitude=-1
+                return {"vx": 0.0, "vy": 0.0, "vz": 0.0, "valid": False, "altitude": -1.0}
             return {"vx": surge.v * args.dvl_bias, "vy": 0.0, "vz": depth.w,
                     "valid": True, "altitude": alt}
         dvl = FakeDvl(vel, port=args.dvl_port, rate_hz=10.0).start()
