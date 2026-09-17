@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""定高前进 —— 高度 PID(z) + 距离 PID(x) 双闭环,叠加在同一条伪手柄指令上。
+"""定高前进 —— 高度 PID(z) + 距离 PID(x) + 航向 PID(r) 三闭环,叠加在同一条伪手柄指令上。
 
 目标:先稳定在指定离底高度,再沿艇艏方向前进指定距离。
 
@@ -10,7 +10,14 @@
      u_x = Kp·(sp−s) + Ki·∫e − Kd·vx   —— D 项直接用 DVL 实测 vx,无需数值微分。
      `--v-cruise` 把距离设定值做成匀速斜坡 → 机器人匀速前进,不会冲过头。
 
-阶段: HOLD(只控高度,等稳) → ADVANCE(高度+距离同时控) → DONE(停前进,继续控高度)
+  3) 航向 r:反馈飞控 ATTITUDE.yaw(不用 DVL 的 yaw,后者无罗盘会漂)。
+     锁定解锁时的航向, HeadingHold(PD) 输出 r, 抑制上升/前进过程中的偏航。
+
+设定值节流(关键): 高度和距离的设定值只有在"实测跟得上"时才继续推进。
+  实测教训: v_cruise=0.15 但机器人只有 ~0.06m/s → 设定值跑到 2.0 而实际才 0.90,
+  滞后 1.18m、u_x 74% 时间顶死限幅, PID 退化成开关控制。节流后滞后 <0.1m、不再饱和。
+
+阶段: HOLD(只控高度,等稳) → ADVANCE(高度+距离+航向) → DONE(反推刹车并稳住)
 
 安全:
   - DVL 丢底锁/超龄 → 立即回中位并停(高度和距离都来自 DVL,没它什么都不能做)。
@@ -38,6 +45,7 @@ for _s in (sys.stdout, sys.stderr):
 from src.pseudo_stick import PseudoStick, load_config  # noqa: E402
 from src.pid import PID  # noqa: E402
 from waypoint.dvl_stream import DvlStream  # noqa: E402
+from waypoint.heading_hold import HeadingHold, wrap_deg  # noqa: E402
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
 
@@ -47,7 +55,7 @@ def main(argv=None) -> int:
     # --- 目标 ---
     ap.add_argument("--alt", type=float, default=0.8, help="目标离底高度 (m)")
     ap.add_argument("--dist", type=float, default=2.0, help="前进距离 (m)")
-    ap.add_argument("--v-cruise", type=float, default=0.15, dest="v_cruise",
+    ap.add_argument("--v-cruise", type=float, default=0.08, dest="v_cruise",
                     help="前进速度 = 距离设定值爬升限速 (m/s)")
     # --- 高度 PID (沿用 altitude_hold 验证过的一组) ---
     ap.add_argument("--alt-kp", type=float, default=1.2, dest="alt_kp")
@@ -62,8 +70,20 @@ def main(argv=None) -> int:
     ap.add_argument("--x-ki", type=float, default=0.05, dest="x_ki")
     ap.add_argument("--x-kd", type=float, default=1.2, dest="x_kd",
                     help="D 项作用于 DVL 实测 vx(阻尼)")
-    ap.add_argument("--x-limit", type=float, default=0.6, dest="x_limit",
+    ap.add_argument("--x-limit", type=float, default=0.8, dest="x_limit",
                     help="前进指令 |u_x| 限幅")
+    ap.add_argument("--max-lag", type=float, default=0.25, dest="max_lag",
+                    help="距离设定值最大允许超前实测多少米(节流);越小越跟脚")
+    ap.add_argument("--alt-lag", type=float, default=0.20, dest="alt_lag",
+                    help="高度设定值最大允许超前实测多少米(节流)")
+    # --- 航向 PID (第三路: 抑制上升/前进时的 yaw 偏移) ---
+    ap.add_argument("--yaw-kp", type=float, default=1.0, dest="yaw_kp")
+    ap.add_argument("--yaw-kd", type=float, default=0.3, dest="yaw_kd")
+    ap.add_argument("--r-limit", type=float, default=0.5, dest="r_limit",
+                    help="偏航指令 |u_r| 限幅")
+    ap.add_argument("--heading", type=float, default=None,
+                    help="要保持的绝对航向(度);默认=解锁时的当前航向")
+    ap.add_argument("--no-yaw", action="store_true", help="关闭航向控制")
     # --- 阶段/容差 ---
     ap.add_argument("--alt-tol", type=float, default=0.06, dest="alt_tol",
                     help="高度到位容差 (m)")
@@ -83,7 +103,7 @@ def main(argv=None) -> int:
                     help="DVL vx 前进符号 (+1/-1)")
     ap.add_argument("--max-age", type=float, default=1.0, dest="max_age")
     ap.add_argument("--umax", type=float, default=1.0)
-    ap.add_argument("--seconds", type=float, default=120.0, help="总超时")
+    ap.add_argument("--seconds", type=float, default=180.0, help="总超时")
     # --- 运行 ---
     ap.add_argument("--exit-mode", default="ALT_HOLD")
     ap.add_argument("--disarm", action="store_true")
@@ -106,9 +126,25 @@ def main(argv=None) -> int:
                 i_limit=args.x_limit, u_limit=args.x_limit)
     pid_z.reset(); pid_x.reset()
 
+    hh = HeadingHold(kp=args.yaw_kp, kd=args.yaw_kd,
+                     r_limit=args.r_limit, tol_deg=3.0)
+
     stick = PseudoStick(cfg, endpoint=args.endpoint)
     stick.u_max = float(args.umax)
+    conn = stick.conn
     dvl = DvlStream(ip=args.dvl_ip, port=args.dvl_port).start()
+
+    yaw_deg = None
+
+    def drain_attitude():
+        """抽干 MAVLink, 取最新 ATTITUDE.yaw(飞控融合航向, 比 DVL 的 yaw 不漂)。"""
+        nonlocal yaw_deg
+        import math as _m
+        while True:
+            m = conn.recv_match(type="ATTITUDE", blocking=False)
+            if m is None:
+                break
+            yaw_deg = wrap_deg(_m.degrees(m.yaw))
 
     DATA_DIR.mkdir(exist_ok=True)
     csv_path = DATA_DIR / f"go_forward_{args.label}.csv"
@@ -152,6 +188,23 @@ def main(argv=None) -> int:
         if not stick.arm():
             return 2
 
+        # 请求 ATTITUDE 并锁定要保持的航向
+        if not args.no_yaw:
+            from pymavlink import mavutil as _mv
+            conn.mav.command_long_send(
+                conn.target_system, conn.target_component,
+                _mv.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0,
+                float(_mv.mavlink.MAVLINK_MSG_ID_ATTITUDE), 5e4, 0, 0, 0, 0, 0)
+            t_y = time.monotonic() + 3.0
+            while time.monotonic() < t_y and yaw_deg is None:
+                drain_attitude(); time.sleep(0.05)
+            if yaw_deg is None:
+                print("[fwd] ⚠ 收不到 ATTITUDE, 本次关闭航向控制")
+                args.no_yaw = True
+            else:
+                hh.reset(args.heading if args.heading is not None else yaw_deg)
+                print(f"[fwd] 航向锁定 = {hh.target_deg:.1f}° (当前 {yaw_deg:.1f}°)")
+
         t0 = time.monotonic()
         sp_alt = dvl.latest().altitude
         sp_dist = 0.0
@@ -194,8 +247,11 @@ def main(argv=None) -> int:
 
             # --- 高度 PID (始终运行) ---
             if args.alt_slew > 0:
-                st = args.alt_slew * dt_nom
-                sp_alt += max(-st, min(st, args.alt - sp_alt))
+                # 设定值节流: 实测跟不上时就不再推进设定值, 避免 sp 跑到机器人前面
+                # (实测从池底起浮时 sp 已到 0.80 而 alt 才 0.50 → 超调到 0.958)
+                if abs(sp_alt - alt) <= args.alt_lag:
+                    st = args.alt_slew * dt_nom
+                    sp_alt += max(-st, min(st, args.alt - sp_alt))
             else:
                 sp_alt = args.alt
             u_pid_z = pid_z.compute(-sp_alt, -alt, -alt_rate, dt_nom)
@@ -230,8 +286,12 @@ def main(argv=None) -> int:
                 else:
                     wrong_dir = 0
                 s += vx * dt_nom                       # 航位推算
-                st = args.v_cruise * dt_nom            # 距离设定值匀速斜坡
-                sp_dist = min(args.dist, sp_dist + st)
+                # 设定值节流: 只有机器人跟得上(滞后 < max_lag)才继续推进设定值。
+                # 实测 v_cruise=0.15 但机器人只有 ~0.06m/s → sp 跑到 2.0 而 s 才 0.90,
+                # 误差被拉到 1.1m、u_x 常年顶死限幅。节流后自动适配机器人真实速度。
+                if sp_dist - s <= args.max_lag:
+                    st = args.v_cruise * dt_nom
+                    sp_dist = min(args.dist, sp_dist + st)
                 u_x = pid_x.compute(sp_dist, s, vx, dt_nom)
                 if s >= args.dist - args.dist_tol and sp_dist >= args.dist - 1e-6:
                     phase = "DONE"; done_t0 = cyc; u_x = 0.0
@@ -245,17 +305,30 @@ def main(argv=None) -> int:
 
             u_x = max(-args.x_limit, min(args.x_limit, u_x))
             u_x_prev = u_x
-            stick.send(x=u_x, z=u_z)
+
+            # --- 航向 PID (第三路) ---
+            u_r = 0.0
+            if not args.no_yaw:
+                drain_attitude()
+                if yaw_deg is not None:
+                    u_r = hh.update(yaw_deg, dt_nom)
+
+            stick.send(x=u_x, z=u_z, r=u_r)
             if int(el * hz) % int(hz) == 0:
                 stick.send_gcs_heartbeat()
 
             rows.append([round(el, 3), phase, round(sp_alt, 4), round(alt, 4),
                          round(u_z, 4), round(sp_dist, 4), round(s, 4),
-                         round(vx, 4), round(u_x, 4)])
+                         round(vx, 4), round(u_x, 4),
+                         round(yaw_deg, 2) if yaw_deg is not None else "",
+                         round(hh.error_deg(yaw_deg), 2) if (yaw_deg is not None and not args.no_yaw) else "",
+                         round(u_r, 4)])
             if el - last_print >= 0.5:
                 last_print = el
+                ystr = (f" | yaw={yaw_deg:+.1f} err={hh.error_deg(yaw_deg):+.1f} u_r={u_r:+.2f}"
+                        if (yaw_deg is not None and not args.no_yaw) else "")
                 print(f"  t={el:5.1f} [{phase:7s}] alt={alt:.3f}/{args.alt:.2f} u_z={u_z:+.3f} | "
-                      f"s={s:.3f}/{args.dist:.2f} (sp{sp_dist:.2f}) vx={vx:+.3f} u_x={u_x:+.3f}")
+                      f"s={s:.3f}/{args.dist:.2f} (sp{sp_dist:.2f}) vx={vx:+.3f} u_x={u_x:+.3f}{ystr}")
 
             sl = dt_nom - (time.monotonic() - cyc)
             if sl > 0:
@@ -293,7 +366,8 @@ def main(argv=None) -> int:
         stick.close()
         with open(csv_path, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
-            w.writerow(["t", "phase", "sp_alt", "alt", "u_z", "sp_dist", "s", "vx", "u_x"])
+            w.writerow(["t", "phase", "sp_alt", "alt", "u_z", "sp_dist", "s", "vx", "u_x",
+                        "yaw", "yaw_err", "u_r"])
             w.writerows(rows)
         print(f"[fwd] 已保存 {csv_path} ({len(rows)} 行)")
 
