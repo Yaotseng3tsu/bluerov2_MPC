@@ -93,6 +93,9 @@ def main(argv=None) -> int:
     ap.add_argument("--yaw-jump-dps", type=float, default=120.0, dest="yaw_jump_dps",
                     help="航向跳变剔除阈值(度/秒)。实测 EKF 会瞬间跳 58°(145°/s),"
                          "控制器当真后猛打舵把机器人抡起来。用陀螺 yawspeed 交叉校验")
+    ap.add_argument("--yaw-accept-n", type=int, default=5, dest="yaw_accept_n",
+                    help="航向跳变连续这么多帧仍偏离 → 认定为参考系平移(而非尖刺),"
+                         "此时平移目标而不是打舵去追")
     ap.add_argument("--yaw-stale", type=float, default=1.5, dest="yaw_stale",
                     help="航向连续被剔除超过该秒数 → 停用航向控制(不拿坏估计驱动推进器)")
     # --- 阶段/容差 ---
@@ -148,6 +151,7 @@ def main(argv=None) -> int:
     yaw_deg = None
     yaw_t = None
     yaw_bad_since = None
+    yaw_bad_n = 0
     yaw_frozen = False
 
     def drain_attitude():
@@ -157,7 +161,7 @@ def main(argv=None) -> int:
         必是航向估计跳变(EKF 重对准/罗盘干扰), 不是真运动。不剔除的话控制器会
         对着假误差猛打舵, 把机器人真的抡起来(2026-09-17 实测)。
         """
-        nonlocal yaw_deg, yaw_t, yaw_bad_since
+        nonlocal yaw_deg, yaw_t, yaw_bad_since, yaw_bad_n
         import math as _m
         while True:
             m = conn.recv_match(type="ATTITUDE", blocking=False)
@@ -167,15 +171,26 @@ def main(argv=None) -> int:
             rate_dps = abs(_m.degrees(m.yawspeed))
             now = time.monotonic()
             if yaw_deg is not None and yaw_t is not None:
-                dt = max(1e-3, now - yaw_t)
-                jump = abs(wrap_deg(y - yaw_deg))
-                # 允许量 = 陀螺实测转速 + 阈值余量; 真在转时自然放行
-                allow = max(8.0, (rate_dps + args.yaw_jump_dps) * dt)
-                if jump > allow:
+                # dt 必须钳位: 否则被拒期间 yaw_t 不更新 → dt 变大 → allow 变大,
+                # 跳变过约 1s 就会被"合法"采纳(实测 105° 跳变即如此漏过)。
+                dt_eff = min(max(1e-3, now - yaw_t), 0.2)
+                delta = wrap_deg(y - yaw_deg)
+                allow = max(8.0, (rate_dps + args.yaw_jump_dps) * dt_eff)
+                if abs(delta) > allow:
+                    yaw_bad_n += 1
                     if yaw_bad_since is None:
                         yaw_bad_since = now
-                    continue          # 丢弃该帧, 沿用上一个好航向
+                    if yaw_bad_n < args.yaw_accept_n:
+                        continue      # 瞬时尖刺: 丢弃, 沿用上一个好航向
+                    # 持续偏离 = 航向**参考系**整体平移(EKF 重对准), 物理指向并没变。
+                    # 正确反应是把目标同量平移, 而不是去追那 100 多度 —— 后者会满舵抡机器人。
+                    hh.target_deg = wrap_deg(hh.target_deg + delta)
+                    hh._integ = 0.0
+                    hh._prev_err_rad = None
+                    print(f"[fwd] ⚠ 航向参考跳变 {delta:+.0f}° → 目标同量平移至 "
+                          f"{hh.target_deg:.1f}°(物理指向不变, 不打舵追)")
             yaw_bad_since = None
+            yaw_bad_n = 0
             yaw_deg = y
             yaw_t = now
 

@@ -80,6 +80,9 @@ def main() -> int:
     p.add_argument("--no-dvl", action="store_true", help="不启假 DVL (测 DVL 失效降级)")
     p.add_argument("--alt-glitch", type=float, default=0.0, dest="alt_glitch",
                    help="注入 DVL 高度跳变的比例 (跳到 2.5m), 复现实测外点")
+    p.add_argument("--yaw-shift-at", type=float, default=0.0, dest="yaw_shift_at",
+                   help="在该时刻(s)起, 给回传航向叠加**持续**偏移(模拟 EKF 重对准)")
+    p.add_argument("--yaw-shift-deg", type=float, default=105.0, dest="yaw_shift_deg")
     p.add_argument("--yaw-glitch", type=float, default=0.0, dest="yaw_glitch",
                    help="注入 ATTITUDE 航向跳变的比例 (瞬时 +58°), 复现实测 EKF 跳变")
     p.add_argument("--dvl-dropout", type=float, default=0.0, dest="dvl_dropout",
@@ -207,6 +210,10 @@ def main() -> int:
             if now - last_att >= 0.05:
                 last_att = now
                 yw = math.atan2(math.sin(yaw.yaw), math.cos(yaw.yaw))  # wrap ±pi
+                if args.yaw_shift_at > 0 and el >= args.yaw_shift_at:
+                    # 持续参考系平移: 陀螺 yawspeed 不变(物理没转), 只有角度整体偏
+                    yw = math.atan2(math.sin(yaw.yaw + math.radians(args.yaw_shift_deg)),
+                                    math.cos(yaw.yaw + math.radians(args.yaw_shift_deg)))
                 if args.yaw_glitch > 0 and _rnd.random() < args.yaw_glitch:
                     yw = math.atan2(math.sin(yaw.yaw + math.radians(58)),
                                     math.cos(yaw.yaw + math.radians(58)))  # 假跳变, 陀螺不变
