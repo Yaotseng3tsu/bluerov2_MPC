@@ -61,10 +61,19 @@ def run(args) -> int:
 
     ctrl = build_controller(args.controller, cfg)
     ctrl.reset()
+    # 负浮力/低 gain: 允许调大 PID 输出与积分限幅 (积分补恒定上推力)
+    if getattr(args, "u_limit", None) is not None:
+        if hasattr(ctrl, "u_limit"):
+            ctrl.u_limit = float(args.u_limit)
+        if hasattr(ctrl, "i_limit"):
+            ctrl.i_limit = float(args.u_limit)
     est = DepthEstimator.from_config()
     setpoint = make_setpoint(args)
 
     stick = PseudoStick(cfg, endpoint=args.endpoint)
+    if getattr(args, "umax", None) is not None:
+        stick.u_max = float(args.umax)
+        print(f"[ctrl] U_MAX 覆盖为 {stick.u_max}")
     from pymavlink import mavutil
     conn = stick.conn
 
@@ -172,12 +181,28 @@ def run(args) -> int:
         print("\n[ctrl] 用户中断 → 中位+上锁")
         return 130
     finally:
+        # 退出: 先回中位; 可选交回某模式(如 ALT_HOLD)并保持 armed(负浮力不沉底)
+        try:
+            for _ in range(5):
+                stick.send_neutral(); time.sleep(0.02)
+        except Exception:
+            pass
+        if getattr(args, "exit_mode", None):
+            stick.set_mode(args.exit_mode)
+            time.sleep(0.3)
+            for _ in range(5):
+                stick.send_neutral(); time.sleep(0.02)
+            print(f"[ctrl] 已交回模式 {args.exit_mode} (保持定深)")
+        if getattr(args, "no_disarm", False):
+            stick.armed_by_us = False   # 阻止 close() 自动 disarm
+            print("[ctrl] --no-disarm: 保持 armed (水下不沉底)")
         stick.close()
         with open(csv_path, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
             w.writerow(["t", "setpoint", "depth", "depth_rate", "u", "status"])
             w.writerows(rows)
-        print(f"[ctrl] 已保存 {csv_path} ({len(rows)} 行);已安全退出(中位+自动上锁)")
+        _exit = "保持 armed" if getattr(args, "no_disarm", False) else "已上锁"
+        print(f"[ctrl] 已保存 {csv_path} ({len(rows)} 行);已安全退出(中位·{_exit})")
 
 
 def main(argv=None) -> int:
@@ -194,6 +219,14 @@ def main(argv=None) -> int:
     p.add_argument("--yes", action="store_true")
     p.add_argument("--tag", default=None, help="CSV 前缀(默认=控制器名)")
     p.add_argument("--label", default="run", help="CSV 标签")
+    p.add_argument("--umax", type=float, default=None,
+                   help="覆盖 U_MAX(z 权限;负浮力/低 gain 需更高)")
+    p.add_argument("--u-limit", type=float, default=None, dest="u_limit",
+                   help="覆盖 PID 输出/积分限幅(负浮力需更大以补恒定上推力)")
+    p.add_argument("--no-disarm", action="store_true",
+                   help="退出不 disarm(水下用,避免沉底)")
+    p.add_argument("--exit-mode", default=None,
+                   help="退出时切到的模式,如 ALT_HOLD(交回飞控定深)")
     return run(p.parse_args(argv))
 
 
