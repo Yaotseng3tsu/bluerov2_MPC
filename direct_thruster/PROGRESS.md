@@ -176,3 +176,16 @@ direct_thruster 线的发送端。改版固件负责"接收/校验/执行/保护
 **`sitl_run.sh` 新增 `--keep` / `--sitl-only` / `--run <命令>`**。`--run` 是推荐用法: 起 SITL → 跑命令 → 收尾,
 保证同一时刻只有一个客户端。**坑: SITL 的 TCP 5760 一次只接一个客户端**, 多连的会被当场关掉, 表现为
 pymavlink 无限刷 `EOF on TCP socket`; 手动分两步时最容易踩到。`connect()` 已加 12s 超时, 不再无限刷屏。
+
+### 环境 — WSL2 墙钟跳变的根因找到并修复 (2026-10-07)
+M4 第 3 轮那个"每 ~5 秒跳 ±7.8 秒"的墙钟问题, 根因**不在 WSL 而在 Windows**:
+- `w32tm /stripchart` 显示宿主相对 NTP **−7.75 秒**, 且 `W32Time` 服务处于 **Stopped**(启动类型却是 Automatic,
+  多半是"自动设置时间"开关关着) —— Windows 根本没在校自己的时钟。
+- WSL 里同时有两个授时源: `systemd-timesyncd`(校到 NTP) 和 `/dev/ptp_hyperv`(拉宿主时间)。两边差 7.75 秒,
+  于是来回拉锯 —— 实测跳变幅度 +7.27/−7.77 正好对上这个差值。
+
+修法是校准**宿主**(管理员 PowerShell): `Start-Service W32Time` →
+`w32tm /config /manualpeerlist:"time.windows.com,0x9" /syncfromflags:manual /update` → `w32tm /resync /force`,
+再 `wsl --shutdown` 重启 WSL。修后宿主偏移 −7.75s → **±0.005s**, WSL 侧跳变消失。
+
+**但代码里的单调时钟不要改回去** —— 环境随时可能再坏(那个开关一关就复发), 判据不该靠环境正确才成立。
