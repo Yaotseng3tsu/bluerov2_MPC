@@ -46,6 +46,7 @@ from src.pseudo_stick import PseudoStick, load_config  # noqa: E402
 from src.pid import PID  # noqa: E402
 from waypoint.dvl_stream import DvlStream  # noqa: E402
 from waypoint.heading_hold import HeadingHold, wrap_deg  # noqa: E402
+from waypoint.altitude_estimator import AltitudeEstimator  # noqa: E402
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
 
@@ -146,7 +147,9 @@ def main(argv=None) -> int:
     stick = PseudoStick(cfg, endpoint=args.endpoint)
     stick.u_max = float(args.umax)
     conn = stick.conn
-    dvl = DvlStream(ip=args.dvl_ip, port=args.dvl_port).start()
+    # 粗过滤交给估计器(新息门控优于固定变化率阈值)
+    dvl = DvlStream(ip=args.dvl_ip, port=args.dvl_port, max_alt_rate=1e9).start()
+    est_alt = AltitudeEstimator()
 
     yaw_deg = None
     yaw_t = None
@@ -235,6 +238,15 @@ def main(argv=None) -> int:
                 print("[fwd] 已取消。")
                 return 0
 
+        # 预热估计器: 解锁前先喂几帧, 避免控制开始时估计未初始化(返回 0)
+        # 导致头一两个周期对着 0 算出满推。
+        for _ in range(12):
+            _s = dvl.latest_valid()
+            if _s.initialized if hasattr(_s, "initialized") else (_s.altitude > 0):
+                est_alt.predict(dt_nom)
+                est_alt.update_alt(_s.altitude)
+            time.sleep(dt_nom)
+
         stick.set_mode(args.mode)
         time.sleep(0.3)
         if not stick.arm():
@@ -272,15 +284,21 @@ def main(argv=None) -> int:
             # --- DVL ---
             if not dvl.is_fresh(args.max_age):
                 stick.send_neutral(); stop_reason = "DVL 丢底锁/超龄"; break
-            d = dvl.latest_valid()   # 用最近有效帧, 容忍瞬时丢帧
-            alt = d.altitude
+            d = dvl.latest_valid()
             vx = d.vx * args.vx_sign
 
-            # 高度变化率
-            if alt_prev is not None and t_prev is not None:
-                dtm = max(1e-3, cyc - t_prev)
-                alt_rate += 0.3 * ((alt - alt_prev) / dtm - alt_rate)
-            alt_prev, t_prev = alt, cyc
+            # --- 高度估计(对齐 ArduSub: 控制器吃估计值而非原始传感器) ---
+            est_alt.predict(dt_nom)                 # 丢帧时按速率外推, 不冻结
+            if d.age_s <= dt_nom * 1.5:             # 本周期有新帧
+                est_alt.update_rate(-d.vz)          # DVL vz 向下为正 → 取负
+                rb = est_alt.update_alt(d.altitude)
+                if rb:
+                    # 与 yaw 不同: 高度是真的变了, 目标不平移;
+                    # 清积分避免冲击, 由 --alt-slew/--alt-lag 平滑跟进
+                    pid_z.integ = 0.0
+                    print(f"[fwd] ⚠ 高度基准跳变 {rb:+.2f}m → 清积分, 由斜坡跟进")
+            _e = est_alt.estimate()
+            alt, alt_rate = _e.alt, _e.rate
 
             # --- 安全 ---
             if not alt_guard and alt >= args.alt_min + 0.05:

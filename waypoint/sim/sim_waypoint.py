@@ -117,7 +117,7 @@ def main() -> int:
         def vel():
             # 真机 DVL 底锁与是否解锁无关: 仿真恒有效 (贴底)
             # 高度 = 池底深度 - 当前深度 (随垂直运动变化, 供 altitude_hold 离线验证)
-            alt = max(0.05, args.bottom - depth.z)
+            alt = max(0.10, args.bottom - depth.z)
             if args.alt_glitch > 0 and _rnd.random() < args.alt_glitch:
                 return {"vx": surge.v * args.dvl_bias, "vy": 0.0, "vz": depth.w,
                         "valid": True, "altitude": 2.5}     # 外点
@@ -197,6 +197,13 @@ def main() -> int:
             surge.ext_force = args.current_vx if armed else 0.0
             surge.step(ux if armed else 0.0, dt)
             depth.step(uz if armed else 0.0, dt)
+            # 真实池底: 不允许穿过去。否则只钳位 altitude 会造出
+            # "高度恒定但 vz 仍在动" 的矛盾数据, 把高度估计器喂坏。
+            # 留 0.10m: 机器人本体有高度, DVL 换能器不会贴到 0 距离
+            if depth.z > args.bottom - 0.10:
+                depth.z = args.bottom - 0.10
+                if depth.w > 0:
+                    depth.w = 0.0
             yaw.step(ur if armed else 0.0, dt)
 
             if now - last_hb >= 1.0:

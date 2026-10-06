@@ -39,6 +39,7 @@ for _s in (sys.stdout, sys.stderr):
 from src.pseudo_stick import PseudoStick, load_config  # noqa: E402
 from src.pid import PID  # noqa: E402
 from waypoint.dvl_stream import DvlStream  # noqa: E402
+from waypoint.altitude_estimator import AltitudeEstimator  # noqa: E402
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
 
@@ -84,7 +85,9 @@ def main(argv=None) -> int:
 
     stick = PseudoStick(cfg, endpoint=args.endpoint)
     stick.u_max = float(args.umax)
-    dvl = DvlStream(ip=args.dvl_ip, port=args.dvl_port).start()
+    # 粗过滤交给估计器(新息门控比固定变化率阈值更合适), 这里不再二次剔除
+    dvl = DvlStream(ip=args.dvl_ip, port=args.dvl_port, max_alt_rate=1e9).start()
+    est = AltitudeEstimator()
 
     DATA_DIR.mkdir(exist_ok=True)
     csv_path = DATA_DIR / f"altitude_hold_{args.label}.csv"
@@ -118,6 +121,15 @@ def main(argv=None) -> int:
                 print("[alt] 已取消。")
                 return 0
 
+        # 预热估计器: 解锁前先喂几帧, 避免控制开始时估计未初始化(返回 0)
+        # 导致头一两个周期对着 0 算出满推。
+        for _ in range(12):
+            _s = dvl.latest_valid()
+            if _s.initialized if hasattr(_s, "initialized") else (_s.altitude > 0):
+                est.predict(dt_nom)
+                est.update_alt(_s.altitude)
+            time.sleep(dt_nom)
+
         stick.set_mode(args.mode)
         time.sleep(0.3)
         if not stick.arm():
@@ -139,15 +151,20 @@ def main(argv=None) -> int:
                 stick.send_neutral()
                 stop_reason = "DVL 丢底锁/超龄"
                 break
-            s = dvl.latest_valid()   # 用最近有效帧, 容忍瞬时丢帧
-            alt = s.altitude
-
-            # 高度变化率(数值微分 + 低通)
-            if alt_prev is not None and t_prev is not None:
-                dt = max(1e-3, cyc - t_prev)
-                raw = (alt - alt_prev) / dt
-                alt_rate += 0.3 * (raw - alt_rate)     # 一阶低通
-            alt_prev, t_prev = alt, cyc
+            # --- 高度估计(对齐 ArduSub: 控制器吃估计值, 不吃原始传感器) ---
+            est.predict(dt_nom)                    # 丢帧时靠速率继续外推, 不冻结
+            s = dvl.latest_valid()
+            rb = 0.0
+            if s.age_s <= dt_nom * 1.5:            # 本周期有新帧
+                est.update_rate(-s.vz)             # DVL vz 向下为正 → 取负得"向上"
+                rb = est.update_alt(s.altitude)    # 新息门控; 返回基准跳变量
+            if rb:
+                # 高度与 yaw 不同: 这里物理距离**确实变了**(或传感器说变了),
+                # 目标不该平移 —— 让 --slew 斜坡去平滑吸收, 同时清积分避免冲击。
+                pid.integ = 0.0
+                print(f"[alt] ⚠ 高度基准跳变 {rb:+.2f}m → 清积分, 由斜坡平滑跟进")
+            e = est.estimate()
+            alt, alt_rate = e.alt, e.rate
 
             # --- 安全边界 ---
             # alt_min 保护"先武装再生效": 允许从池底起浮(起始 alt 可能本就低于 alt_min),
