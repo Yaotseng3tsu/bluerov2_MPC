@@ -191,8 +191,9 @@ spool 门控、看门狗+锁存+恢复流程，这些**逻辑**在真实 ArduSub
    这次还能用开机 STATUSTEXT `EXT-THRUSTER build...` 直接确认跑的是哪份。
 2. **干测**：`servo_monitor.py` 看 8 路输出，重跑 B4 那套逐一扫描。
    建议首轮用小幅度短点动（±0.1、每次 1 秒）而不是 0.5——直控层没有混控兜底，单桨满推时整机会在台面上移动。
-3. **上位机 `external_thruster.py`**：发 `SET_ACTUATOR_CONTROL_TARGET`，复用 `pseudo_stick` 的
-   看门狗 / 退出归中 + 自动上锁范式。
+3. ~~上位机 `external_thruster.py`~~ **已完成并在 SITL 验过**（2026-10-07，四步全过：未解锁不动桨 /
+   单路 1620 / 八路扫描 / `u_max` 限幅）。干测时直接用：
+   `--endpoint udpin:0.0.0.0:14550 --arm --u-max 0.1 --sweep --thrust 0.1 --dwell 1.0`
 4. **推力标定**：把分配器的 fᵢ（牛顿）映射到接口的 `[-1,1]`。
 5. 之后才是水下。
 
