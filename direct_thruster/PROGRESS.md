@@ -146,3 +146,33 @@ NG 变 OK —— 即 `sub.parm` 确实显式设过 `SERVO8_FUNCTION`。`add_moto
 
 **下一步 = M5 刷改版固件**(需用户显式同意; 排在 waypoint 收尾之后) → 干测(重跑 B4 那套逐一扫描,
 建议首轮 ±0.1 短点动) → 上位机 `external_thruster.py` → 推力标定 → 水下。
+
+### direct_thruster — 上位机 `external_thruster.py` 完成并在 SITL 验过 (2026-10-07, dev 侧, 未刷机)
+direct_thruster 线的发送端。改版固件负责"接收/校验/执行/保护", 本文件负责"发送 + 上位机侧安全外壳";
+它不是 MPC 也不是分配器。接口 `controls[i] ∈ [-1,1]` 对应 Motor(i+1), 是**归一化执行器命令不是牛顿**。
+
+**安全范式照搬 `src/pseudo_stick.py`(限幅 / 看门狗 / 退出先回中位再自动上锁 / 默认不解锁), 但三处必须不同**:
+1. **持续发送是硬要求而非好习惯**。MANUAL_CONTROL 停发只是不动; 外部直控停发超过 `MOT_EXT_TMOUT`
+   会被归中 + 自动 disarm + **锁存**。所以 keepalive 线程是强制的: 构造时校验 `hz >= 4/TMOUT`,
+   `arm()` 会检查 keepalive 在不在跑, 没跑直接 RuntimeError(否则刚解锁就被判失联)。
+2. **要管 `MOT_EXT_ENABLE`**: `open()` 置 1, `close()` 置 0。
+3. **清锁存有顺序陷阱**: `reset_latch()` 照搬 M4 验证过的顺序(先让看门狗在 ENABLE 还开着时打一次)。
+
+**其他安全设计**: 默认**不解锁**(不加 `--arm` 只验链路); 默认连 **SITL** 而不是真机(与本目录其它只读工具
+相反, 因为这个会驱动推进器); 固件的 `[-1,1]` 之外再加上位机 `u_max`(默认 0.3); 非法值在上位机就拒收
+(固件虽然整帧拒收, 但那会白费一个控制周期, 而那个周期里固件沿用上一条命令); 退出保护顺序固定为
+归零 → 上锁 → 关外部直控, 正常/Ctrl+C/异常都走 `finally`; 收到 `Lost external thrust commands` 立刻中止;
+超过 5s 没收到飞控心跳也中止; 退出时报 keepalive 最差间隔。计时全用 `time.monotonic()`。
+
+**SITL 四步验收全过**(`sitl_run.sh --run "..."`):
+
+| 步 | 结果 |
+|---|---|
+| 未解锁 + 零命令 | 8 路恒 1500 |
+| `--motor 3 --thrust 0.3` | SERVO3 = **1620** (=1500+0.3×400), 其余七路 1500 |
+| `--sweep --thrust 0.3` | M1→M8 各自 1620, 其余恒中位 (上位机版的 B4) |
+| `--thrust 0.9` | 被 `u_max=0.3` 压到 1620, 并打印限幅提示 |
+
+**`sitl_run.sh` 新增 `--keep` / `--sitl-only` / `--run <命令>`**。`--run` 是推荐用法: 起 SITL → 跑命令 → 收尾,
+保证同一时刻只有一个客户端。**坑: SITL 的 TCP 5760 一次只接一个客户端**, 多连的会被当场关掉, 表现为
+pymavlink 无限刷 `EOF on TCP socket`; 手动分两步时最容易踩到。`connect()` 已加 12s 超时, 不再无限刷屏。
