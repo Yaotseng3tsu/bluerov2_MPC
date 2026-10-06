@@ -216,5 +216,13 @@ spool 门控、看门狗+锁存+恢复流程，这些**逻辑**在真实 ArduSub
 - MAVLink 要锁定真飞控心跳，否则 sys=0 读不到参数
 - 刷机后必须 RESTART 并看 uptime
 - SITL 与测试脚本要在同一个 WSL 会话；python 加 `-u`
-- **WSL2 墙钟会前后跳 ±8 秒** → 任何计时一律用 `time.monotonic()`，别用 `time.time()`
+- **WSL2 墙钟会前后跳数秒** → 任何计时一律用 `time.monotonic()`，别用 `time.time()`。
+  根因（2026-10-07 已修）：Windows 的 `W32Time` 服务停着、宿主时钟慢了 7.75 秒，而 WSL 里
+  `systemd-timesyncd`（校到 NTP）和 `/dev/ptp_hyperv`（拉宿主时间）两个授时源来回拉锯。
+  修法是校准**宿主**：管理员 PowerShell 跑 `Start-Service W32Time` +
+  `w32tm /config /manualpeerlist:"time.windows.com,0x9" /syncfromflags:manual /update` +
+  `w32tm /resync /force`，再 `wsl --shutdown`。
+  查法：`w32tm /stripchart /computer:time.windows.com /samples:5 /dataonly` 看宿主偏移；
+  WSL 里比较 `time.time()` 与 `time.monotonic()` 的相对漂移看跳变。
+  **但代码该用单调时钟还是要用** —— 环境随时可能再坏，不该靠环境正确才成立。
 - SITL 要钉死 `SERVO1..8_FUNCTION=33..40`，否则 `sub.parm` 的显式值会抢走电机的输出通道
