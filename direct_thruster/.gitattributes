@@ -1,0 +1,6 @@
+# 本仓库 core.autocrlf=true。下面两类文件必须是 LF:
+#   *.sh    —— WSL 的 bash 遇到 CRLF 会报 "$'\r': command not found"
+#   *.parm  —— SITL 的 defaults 解析器会把行尾 \r 当成参数值的一部分
+# 作用域只限 direct_thruster/, 不影响 waypoint 线。
+*.sh    text eol=lf
+*.parm  text eol=lf
