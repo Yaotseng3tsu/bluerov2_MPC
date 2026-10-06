@@ -1,6 +1,6 @@
 # direct_thruster — 会话交接文档
 
-> 更新：2026-10-06。新会话请先读本文件，再按需查 [README.md](README.md)（完整方案）、[M0_baseline.md](M0_baseline.md)（实机基线）。
+> 更新：2026-10-06。新会话请先读本文件，再按需查 [README.md](README.md)（完整方案）、[M0_baseline.md](M0_baseline.md)（实机基线）、[PROGRESS.md](PROGRESS.md)（本线进度流水）。
 
 ---
 
@@ -162,7 +162,7 @@ timeout 200 python3 -u /mnt/c/bluerov2_mpc/direct_thruster/sitl_accept.py > acce
    - **B** 只给 Motor3 → 只有 SERVO3 离开中位，其余恒 1500
    - **C** 停发命令（心跳仍在）→ 归中 + disarm + 锁存 + 告警 STATUSTEXT
    - **D** 非法/越权拒收：错误 group / NaN / 超范围 / 锁存期间合法命令也拒绝 / 清 `MOT_EXT_ENABLE` 后恢复可控
-2. SITL 全绿 → 提交并记录进 `PROGRESS.md`
+2. SITL 全绿 → 提交并记录进 **`direct_thruster/PROGRESS.md`**（本线的进度写这里；仓库根的 `PROGRESS.md` 归 waypoint 线独占，别往那里追加）
 3. 之后才谈：刷改版固件（**需用户同意 + 拆桨**）→ 断桨干测（用 `servo_monitor` 验 8 路独立）→ 写上位机 `external_thruster.py`（发 `SET_ACTUATOR_CONTROL_TARGET`，复用 `pseudo_stick` 的看门狗/退出归中+自动上锁范式）→ 水下
 
 ---
