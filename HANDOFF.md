@@ -1,6 +1,6 @@
 # BlueROV2 定高前进 — 交接文档
 
-> 最后更新:2026-10-06 | 仓库 `C:\bluerov2_mpc` | GitHub `Yaotseng3tsu/bluerov2_MPC` (main)
+> 最后更新:2026-10-07 | 仓库 `C:\bluerov2_mpc` | GitHub `Yaotseng3tsu/bluerov2_MPC` (main)
 > 上一阶段详细流水见 `PROGRESS.md`,现场记录见 `waypoint/RESULTS.md`
 
 ---
@@ -14,10 +14,11 @@
 当前架构 = **三路 PID 并行,叠加到同一条指令**:
 
 ```
-高度 PID(z) ← DVL 离底高度(经 KF 估计)    ┐
-距离 PID(x) ← DVL 航位推算 s = ∫vx·dt      ├─► MANUAL_CONTROL(x, 0, z, r) ─► 飞控 ─► 8×T200
-航向 PID(r) ← 飞控 ATTITUDE.yaw            ┘
+高度 PID(z) ← 高度估计: DVL 高度(慢变基准) + 飞控 EKF 垂向速度(快通道)  ┐
+距离 PID(x) ← DVL 逐帧航位推算 s = Σ vx·dt_frame                     ├─► MANUAL_CONTROL(x,0,z,r) ─► 飞控 ─► 8×T200
+航向 PID(r) ← 陀螺积分航向(罗盘只做 tau=120s 慢速对齐)                 ┘
 ```
+三路估计统一在 `waypoint/nav_state.py` 里算,两个主脚本吃同一份实现。
 
 阶段机:`HOLD`(稳到目标高度)→ `ADVANCE`(三闭环同时控)→ `DONE`(反推刹车+稳住)
 
@@ -32,7 +33,9 @@
 | `src/pseudo_stick.py` | **唯一指令出口**:归一化 u → `manual_control_send`;含 `warn_if_rival()` 竞争源检测 |
 | `src/pid.py` | PID(积分限幅 + 条件积分抗饱和) |
 | `waypoint/dvl_stream.py` | DVL 读取(后台线程、断线自愈、`latest_valid()` 容忍丢帧) |
-| `waypoint/altitude_estimator.py` | **2 状态 KF**:新息门控 + vz 惯性桥接 + 跳变再基准 |
+| `waypoint/nav_state.py` | **导航状态汇总**:高度 / 航向 / 前向位移 一次算齐,两个主脚本共用 |
+| `waypoint/altitude_estimator.py` | **2 状态 KF**:新息门控 + 速率惯性桥接 + 跳变再基准 |
+| `waypoint/heading_tracker.py` | **陀螺积分航向**:罗盘慢速对齐 + EKF 重对准只平移参考系偏置 |
 | `waypoint/altitude_hold.py` | 定高 |
 | `waypoint/go_forward.py` | **主脚本**(三闭环 + 阶段机 + 全部安全逻辑) |
 | `waypoint/heading_hold.py` | 航向 PID(含积分;误差 wrap 走最短转向) |
@@ -42,6 +45,7 @@
 | `waypoint/dvl_traj_log.py` / `plot_dvl_traj.py` | 无界面记录 / 离线出图 |
 | `waypoint/sim/sim_waypoint.py` | 4DOF SITL + 故障注入 |
 | `tests/test_safety.py` | 安全测试(应 **9/9**) |
+| `tests/test_nav.py` | 导航重构的离线对照(旧 vs 新,应 **7/7**) |
 
 ### 2.2 真机实测参数(2026-09-17 水池)
 
@@ -88,8 +92,11 @@
 
 | | 处理 | 原因 |
 |---|---|---|
-| **yaw 参考跳变** | **平移目标**,不打舵 | 物理指向没变,只是参考系变了 |
+| **yaw 参考跳变** | **平移参考系偏置**,航向估计与目标都不动 | 物理指向没变,只是 EKF 换了参考系 |
 | **高度基准跳变** | **目标不平移**,只清积分 | 物理距离确实变了,由 slew/节流平滑跟进 |
+
+> 2026-10-07 起航向由**陀螺积分**维持,绝对 yaw 只做慢速对齐。所以 yaw 重对准不再需要
+> "平移控制目标",只平移"EKF 系 → 我们系"的偏置即可 —— 对控制器是一次 no-op。
 
 ---
 
@@ -100,6 +107,9 @@
 1. **跑脚本前断开 Cockpit/QGC 手柄** —— 否则抢信号,一切现象都不可信
 2. `FS_PILOT_TIMEOUT` 放宽到 **30s** —— 手柄断开后脚本停发会 disarm → 负浮力沉底
 3. **水下绝不 disarm** —— 退出时交回 `ALT_HOLD` 且保持 armed(脚本默认已如此)
+4. 航向**不要**依赖 QGC/Cockpit 显示的罗盘读数判断脚本是否跑偏 —— 飞控的 yaw 会被
+   EKF 重对准整体跳(池内磁场不稳),脚本用的是自己的陀螺积分航向,两者差一个偏置是正常的。
+   CSV 里的 `yaw_off` / `realign_n` 列记录了这个偏置与重对准次数
 
 ### 3.2 开发约束
 
@@ -127,28 +137,51 @@
 
 ## 4. 当前进度
 
-### 4.1 刚完成
+### 4.1 刚完成(2026-10-07)
 
-**高度估计重构**(对齐 ArduSub)。合成数据 5 种子对照:
+**导航重构** —— 按一份 ArduSub 4.7.1 源码阅读(深度计/IMU/DVL 的滤波与 ALT_HOLD/POSHOLD
+怎么用它们)逐条对照我们的实现,改了四处。详细流水见 PROGRESS.md 同名小节。
 
-| 指标 | 旧 | 新 | 改善 |
-|---|---|---|---|
-| 全程 RMSE | 0.0943 | **0.0360** | 2.6× |
-| 最大误差 | 0.6718 | **0.3050** | 2.2× |
-| 速率 RMSE | 0.2466 | **0.0641** | **3.8×** |
+1. **航向**:从"绝对 yaw + 打补丁"改成"**陀螺积分 + 罗盘慢速对齐**"。EKF 重对准只平移
+   参考系偏置,航向估计与控制目标都不动。航向环 D 项改吃实测角速率,不再微分会跳的角度。
+2. **高度**:把 `GLOBAL_POSITION_INT` 的深度/垂向速度接成**快通道**(约 26Hz),
+   DVL 高度降为慢变绝对基准 —— 这正是 ArduSub SURFTRAK 的结构。只用速率不用绝对深度。
+3. **距离**:按 DVL 报文自带的 `time`(帧间隔)**逐帧**航位推算,不再在 10Hz 环里重积分 ZOH。
+4. dt 全程用实测步长。
 
-SITL 回归:干净末态高度误差 **−0.002m**;注入(外点3% + 丢帧2.5% + 航向尖刺5% + 永久105°平移)
-末态 **−0.001m**、外点全被拒、`|u_r|` 峰值 **0.00**。安全测试 **9/9**。已 push。
+离线对照 `tests/test_nav.py`(**7/7**,旧 vs 新):
+
+| 项 | 旧 | 新 |
+|---|---|---|
+| 位移误差(35s / 2m) | 4.1% | **0.1%** |
+| 高度 RMSE / 最大误差 | 0.0124 / 0.0666 | **0.0080 / 0.0261** |
+| 高度速率 RMSE | 0.0766 | **0.0192**(3.99×) |
+| 虚假打舵 u_r 峰值 | 0.90(满舵) | **0.14** |
+| 航向估计误差峰值 | 173.7° | **1.3°** |
+
+SITL 回归(隔离端口):干净与**全故障注入**两种工况末态高度误差都是 **−0.002m**、
+距离 1.90/2.00、`u_r` 峰值 **0.000**、`yaw_err` 峰值 **0.00°**,期间吸收 4 次罗盘重对准。
+故障注入 = 高度外点3% + 丢帧2.5% + 航向尖刺5% + **每10s罗盘重置±40°** + 深度噪声5mm。
+`--no-depth` / `--no-yaw` 降级路径均已验过。安全测试 **9/9**。
+
+> **接口变化**:`go_forward` 去掉 `--yaw-jump-dps`,新增 `--yaw-tau` / `--yaw-gate-deg` /
+> `--no-depth`;`--yaw-stale` 语义改为"收不到 ATTITUDE 多久"。
+> CSV 新增 6 列:`alt_rate` / `depth` / `depth_used` / `yaw_off` / `realign_n` / `dt`。
+> `altitude_hold` 的默认增益已回填成 9/17 调好的那组(原默认是调参**之前**的值)。
 
 ### 4.2 下一步(按优先级)
 
-**① 干净环境重跑基线**(手柄断开 + 新估计器,这是第一组可信数据):
+**① 干净环境重跑基线**(手柄断开 + 新导航,这是第一组可信数据):
 ```powershell
 .venv\Scripts\python -m waypoint.dvl_dashboard --tag clean --reset   # 另开窗口, 浏览器 localhost:8080
-.venv\Scripts\python -m waypoint.altitude_hold --target 0.8 --u-bias -0.6 --alt-min 0.3 --alt-max 1.2 --label clean_alt
-.venv\Scripts\python -m waypoint.go_forward --alt 0.8 --dist 1.0 --max-dist 1.4 --label clean_1m
-.venv\Scripts\python -m waypoint.go_forward --alt 0.8 --dist 2.0 --max-dist 2.3 --label clean_2m
+.venv\Scripts\python -m waypoint.altitude_hold --target 0.8 --u-bias -0.6 --alt-min 0.3 --alt-max 1.2 --seconds 60 --label clean1007_alt
+.venv\Scripts\python -m waypoint.go_forward --alt 0.8 --dist 1.0 --max-dist 1.4 --label clean1007_1m
+.venv\Scripts\python -m waypoint.go_forward --alt 0.8 --dist 2.0 --max-dist 2.3 --label clean1007_2m
 ```
+> ⚠ **标签必须带日期**。`waypoint/data/` 整个在 .gitignore 里、git 中没有副本,而
+> `go_forward_clean_1m.csv`(9/17 16:17,唯一完全干净的旧数据)已经存在 ——
+> 用 `--label clean_1m` 会**直接覆写掉它且无法恢复**。
+> 增益不用再手动传:`altitude_hold` 的默认值已经是调好的那组。
 
 **② 重新标定推力-速度曲线** → 定 `--x-ff` / `--v-cruise`(现值出自受污染的 f05)
 
@@ -167,7 +200,10 @@ SITL 回归:干净末态高度误差 **−0.002m**;注入(外点3% + 丢帧2.5% 
 
 ### 4.3 已知未决
 
-- 航向估计跳变的**根因**(EKF 重对准 / 罗盘干扰)未查清,目前只做了容错
+- 航向重对准的**具体触发规则**未从 ArduSub 源码确证("下潜超 0.5m 用罗盘重置一次"这条
+  的阈值与是否反复触发)。现象本身是确证的,且 2026-10-07 的改法不依赖这个细节 ——
+  航向已不再以飞控的绝对 yaw 为基准。要精确出处需扒 `AP_NavEKF3_MagFusion.cpp`
+- 陀螺积分航向的**长期漂移**未在真机量过(`--yaw-tau` 该取多大只有合成数据依据)
 - surge 系统辨识(W2)从未在干净环境完成
 - 两个交付包待重新打包(底稿见 `docs/packaging/`,旧 `dist/` 已删;须等 ① 的干净基线出来)
 
@@ -181,13 +217,18 @@ SITL 回归:干净末态高度误差 **−0.002m**;注入(外点3% + 丢帧2.5% 
 .venv\Scripts\python -m waypoint.yaw_monitor --seconds 40      # 航向(手动转动核对)
 .venv\Scripts\python -m src.link --check --seconds 8           # 链路+深度源
 
-# SITL 回归(隔离端口)
+# 离线测试(不连机)
+.venv\Scripts\python tests\test_safety.py     # 安全逻辑, 应 9/9
+.venv\Scripts\python tests\test_nav.py        # 导航重构旧vs新对照, 应 7/7
+.venv\Scripts\python -m waypoint.heading_tracker   # 航向跟踪器自检, 应 5/5
+
+# SITL 回归(隔离端口 14598/14599/16299, 绝不碰真机的 14550)
 .venv\Scripts\python -m waypoint.sim.sim_waypoint --bind-port 14599 --ctrl-addr 127.0.0.1:14598 `
-    --dvl-port 16299 --seconds 100 --z0 1.2 --bottom 2.5 --net-buoy 48 `
-    --alt-glitch 0.03 --dvl-dropout 0.025 --yaw-glitch 0.05
+    --dvl-port 16299 --seconds 120 --z0 1.2 --bottom 2.5 --net-buoy 48 `
+    --alt-glitch 0.03 --dvl-dropout 0.025 --yaw-glitch 0.05 `
+    --compass-reset-every 10 --compass-reset-deg 40 --depth-noise 0.005
 .venv\Scripts\python -m waypoint.go_forward --endpoint udpin:0.0.0.0:14598 `
     --dvl-ip 127.0.0.1 --dvl-port 16299 --alt 0.8 --dist 2.0 --u-bias -0.6 `
     --alt-min 0.2 --alt-max 2.0 --yes --label sitl_check
-
-.venv\Scripts\python tests\test_safety.py                      # 应 9/9
+# 期望: 末态高度误差 ~-0.002m, u_r 峰值 0.000, yaw_err 峰值 0.00deg, 重对准被吸收
 ```

@@ -39,7 +39,7 @@ for _s in (sys.stdout, sys.stderr):
 from src.pseudo_stick import PseudoStick, load_config  # noqa: E402
 from src.pid import PID  # noqa: E402
 from waypoint.dvl_stream import DvlStream  # noqa: E402
-from waypoint.altitude_estimator import AltitudeEstimator  # noqa: E402
+from waypoint.nav_state import NavState  # noqa: E402
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
 
@@ -48,14 +48,18 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description="高度控制 (PID + DVL altitude + 伪手柄)")
     ap.add_argument("--target", type=float, required=True, help="目标离底高度 (m)")
     ap.add_argument("--seconds", type=float, default=30.0)
-    ap.add_argument("--kp", type=float, default=1.5)
-    ap.add_argument("--ki", type=float, default=0.4)
-    ap.add_argument("--kd", type=float, default=0.8)
+    # 默认 = 2026-09-17 水池调好的那组 (altitude_hold_tuned.csv, 13:24):
+    # 原默认 kp1.5/ki0.4/kd0.8 积分过强, 实测有 ~15s 周期的慢振荡; 调成下面这组后
+    # 振荡消除、最后 5s std 0.014m。当时只写在命令行里, 脚本默认值一直没回填,
+    # 而 go_forward 的高度环早已用的是这一组 —— 两处不一致, 基线无法对照。
+    ap.add_argument("--kp", type=float, default=1.2)
+    ap.add_argument("--ki", type=float, default=0.15)
+    ap.add_argument("--kd", type=float, default=1.5)
     ap.add_argument("--u-limit", type=float, default=0.9, dest="u_limit",
                     help="PID 输出/积分限幅")
     ap.add_argument("--u-bias", type=float, default=0.0, dest="u_bias",
                     help="前馈偏置(负=恒定上推力,补负浮力);建议先试 -0.5")
-    ap.add_argument("--slew", type=float, default=0.2,
+    ap.add_argument("--slew", type=float, default=0.15,
                     help="设定值爬升限速 (m/s, 0=关闭)。大阶跃时把目标做成斜坡,"
                          "避免推力饱和导致超调")
     ap.add_argument("--umax", type=float, default=1.0, help="覆盖 U_MAX")
@@ -63,6 +67,8 @@ def main(argv=None) -> int:
                     help="低于此高度即停(防撞底)")
     ap.add_argument("--alt-max", type=float, default=3.0, dest="alt_max",
                     help="高于此高度即停(防冲出水面)")
+    ap.add_argument("--no-depth", action="store_true",
+                    help="不使用飞控深度/EKF 垂向速度, 高度速率退回 DVL vz(降级用)")
     ap.add_argument("--max-age", type=float, default=1.0, dest="max_age",
                     help="DVL 数据超龄阈值 (s)")
     ap.add_argument("--exit-mode", default="ALT_HOLD", help="退出时交回的模式(空=不切)")
@@ -85,21 +91,22 @@ def main(argv=None) -> int:
 
     stick = PseudoStick(cfg, endpoint=args.endpoint)
     stick.u_max = float(args.umax)
+    conn = stick.conn
     # 粗过滤交给估计器(新息门控比固定变化率阈值更合适), 这里不再二次剔除
     dvl = DvlStream(ip=args.dvl_ip, port=args.dvl_port, max_alt_rate=1e9).start()
-    est = AltitudeEstimator()
+    # 高度 = DVL 离底高度(慢变绝对基准) + 飞控 EKF 垂向速度(快通道), 见 nav_state.py
+    nav = NavState(conn, dvl, hz=hz, use_depth=not args.no_depth)
 
     DATA_DIR.mkdir(exist_ok=True)
     csv_path = DATA_DIR / f"altitude_hold_{args.label}.csv"
     rows = []
 
-    alt_prev = None
-    t_prev = None
-    alt_rate = 0.0        # d(alt)/dt, 低通滤波
+    alt_rate = 0.0        # d(alt)/dt, 由估计器给出
 
     try:
         if not stick.wait_heartbeat(float(cfg["connection"].get("heartbeat_timeout_s", 10))):
             return 1
+        nav.request_streams(att_hz=0, pos_hz=20.0)   # 本脚本不控航向, 只要深度流
         print(f"[alt] 等待 DVL 底锁 ...")
         t_w = time.monotonic() + 8.0
         while time.monotonic() < t_w and not dvl.is_fresh(args.max_age):
@@ -123,12 +130,14 @@ def main(argv=None) -> int:
 
         # 预热估计器: 解锁前先喂几帧, 避免控制开始时估计未初始化(返回 0)
         # 导致头一两个周期对着 0 算出满推。
-        for _ in range(12):
-            _s = dvl.latest_valid()
-            if _s.initialized if hasattr(_s, "initialized") else (_s.altitude > 0):
-                est.predict(dt_nom)
-                est.update_alt(_s.altitude)
-            time.sleep(dt_nom)
+        fix = nav.prime(seconds=3.0, need_heading=False)
+        if not fix.alt_ok:
+            print("[alt] ❌ 高度估计未能初始化(DVL 数据不足), 中止。")
+            return 1
+        if args.no_depth or fix.depth is None:
+            print("[alt] ⚠ 未使用深度计快通道, 高度速率退回 DVL vz")
+        else:
+            print(f"[alt] 深度计快通道 OK  depth={fix.depth:.3f}m vz={fix.depth_rate:+.3f}m/s")
 
         stick.set_mode(args.mode)
         time.sleep(0.3)
@@ -136,7 +145,7 @@ def main(argv=None) -> int:
             return 2
 
         t0 = time.monotonic()
-        sp = dvl.latest_valid().altitude      # 斜坡起点 = 当前高度
+        sp = fix.alt                          # 斜坡起点 = 当前高度估计
         alt_guard = (sp >= args.alt_min + 0.05)   # 起步就在安全高度以上则立即武装
         last_print = 0.0
         stop_reason = "完成"
@@ -146,25 +155,23 @@ def main(argv=None) -> int:
             if el >= args.seconds:
                 break
 
-            # --- DVL 高度 ---
+            # --- 导航估计(控制器吃估计值, 不吃原始传感器) ---
+            fix = nav.update()
+            dt = fix.dt
             if not dvl.is_fresh(args.max_age):
                 stick.send_neutral()
                 stop_reason = "DVL 丢底锁/超龄"
                 break
-            # --- 高度估计(对齐 ArduSub: 控制器吃估计值, 不吃原始传感器) ---
-            est.predict(dt_nom)                    # 丢帧时靠速率继续外推, 不冻结
-            s = dvl.latest_valid()
-            rb = 0.0
-            if s.age_s <= dt_nom * 1.5:            # 本周期有新帧
-                est.update_rate(-s.vz)             # DVL vz 向下为正 → 取负得"向上"
-                rb = est.update_alt(s.altitude)    # 新息门控; 返回基准跳变量
-            if rb:
+            if not fix.alt_ok:
+                stick.send_neutral()
+                stop_reason = "高度估计失效(无量测可用)"
+                break
+            alt, alt_rate = fix.alt, fix.alt_rate
+            if fix.alt_reset_delta:
                 # 高度与 yaw 不同: 这里物理距离**确实变了**(或传感器说变了),
                 # 目标不该平移 —— 让 --slew 斜坡去平滑吸收, 同时清积分避免冲击。
                 pid.integ = 0.0
-                print(f"[alt] ⚠ 高度基准跳变 {rb:+.2f}m → 清积分, 由斜坡平滑跟进")
-            e = est.estimate()
-            alt, alt_rate = e.alt, e.rate
+                print(f"[alt] ⚠ 高度基准跳变 {fix.alt_reset_delta:+.2f}m → 清积分, 由斜坡平滑跟进")
 
             # --- 安全边界 ---
             # alt_min 保护"先武装再生效": 允许从池底起浮(起始 alt 可能本就低于 alt_min),
@@ -182,13 +189,13 @@ def main(argv=None) -> int:
 
             # --- 设定值限速: 大阶跃做成斜坡, 避免推力饱和 → 超调 ---
             if args.slew > 0:
-                step = args.slew * dt_nom
+                step = args.slew * dt
                 sp += max(-step, min(step, args.target - sp))
             else:
                 sp = args.target
 
             # --- PID: 把"高度"取负当作"深度"用, 复用已验证的深度 PID (+u=下潜) ---
-            u_pid = pid.compute(-sp, -alt, -alt_rate, dt_nom)
+            u_pid = pid.compute(-sp, -alt, -alt_rate, dt)
             u_raw = args.u_bias + u_pid
             u_z = max(-1.0, min(1.0, u_raw))
             # --- 抗饱和(back-calculation): 钳位发生在 PID 之外, 需把多余量退回积分 ---
@@ -200,7 +207,9 @@ def main(argv=None) -> int:
 
             err = args.target - alt
             rows.append([round(el, 3), round(args.target, 3), round(sp, 4), round(alt, 4),
-                         round(alt_rate, 4), round(u_pid, 4), round(u_z, 4)])
+                         round(alt_rate, 4), round(u_pid, 4), round(u_z, 4),
+                         round(fix.depth, 4) if fix.depth is not None else "",
+                         1 if fix.depth_used else 0, round(dt, 4)])
             if el - last_print >= 0.5:
                 last_print = el
                 print(f"  t={el:5.1f} alt={alt:+.3f} sp={sp:.3f}/{args.target:.2f} "
@@ -242,7 +251,8 @@ def main(argv=None) -> int:
         stick.close()
         with open(csv_path, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
-            w.writerow(["t", "target", "sp", "alt", "alt_rate", "u_pid", "u_z"])
+            w.writerow(["t", "target", "sp", "alt", "alt_rate", "u_pid", "u_z",
+                        "depth", "depth_used", "dt"])
             w.writerows(rows)
         print(f"[alt] 已保存 {csv_path} ({len(rows)} 行)")
 

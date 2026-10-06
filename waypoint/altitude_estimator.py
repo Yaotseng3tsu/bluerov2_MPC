@@ -38,7 +38,8 @@ class AltEstimate:
     initialized: bool    # 是否已有有效初值
     reset_delta: float   # 本次发生基准跳变的 Δ (m);控制器应把目标同量平移。无跳变时 0
     rejected: int        # 当前连续被门控拒绝的量测数
-    age_s: float         # 距最近一次被接受的量测多久 (s)
+    age_s: float         # 距最近一次被接受的**高度**量测多久 (s)
+    rate_age_s: float    # 距最近一次被接受的**速率**量测多久 (s)
 
 
 class AltitudeEstimator:
@@ -48,7 +49,9 @@ class AltitudeEstimator:
                  q_alt: float = 0.01,      # 高度过程噪声 (m^2/s)
                  q_rate: float = 0.15,     # 速率过程噪声 (m^2/s^3) —— 越大越信量测
                  r_alt: float = 0.0025,    # 量测噪声 (m^2);DVL 高度 std≈5cm → 0.05^2
-                 r_vz: float = 0.01,       # DVL 垂向速度量测噪声 (m/s)^2
+                 r_vz: float = 0.01,       # DVL 垂向速度量测噪声 (m/s)^2 (sigma 0.1)
+                 r_vz_ekf: float = 0.0009, # 飞控 EKF 垂向速度量测噪声 (sigma 0.03)
+                 max_rate: float = 2.0,    # |rate| 合理上限 (m/s), 超过视为坏帧
                  gate_sigma: float = 3.0,  # 新息门控 (倍 sigma)
                  reset_after: int = 6,     # 连续被拒这么多次 → 判为真实跳变, 重置基准
                  max_coast_s: float = 2.0, # 无有效量测时最多外推多久 (超过则判失效)
@@ -57,6 +60,8 @@ class AltitudeEstimator:
         self.init_n = max(1, init_n)
         self.q_alt, self.q_rate = q_alt, q_rate
         self.r_alt, self.r_vz = r_alt, r_vz
+        self.r_vz_ekf = r_vz_ekf
+        self.max_rate = max_rate
         self.gate_sigma = gate_sigma
         self.reset_after = reset_after
         self.max_coast_s = max_coast_s
@@ -70,6 +75,7 @@ class AltitudeEstimator:
         self.initialized = False
         self._rejected = 0
         self._since_accept = 0.0
+        self._rate_age = 0.0
         self._pending = None     # 连续被拒时记住的候选值(用于再基准)
         self._gate_frozen = None # 首次拒绝时冻结门限(见 update_alt)
         self._init_buf = []      # 初始化缓冲(取中位数)
@@ -81,6 +87,7 @@ class AltitudeEstimator:
             return
         self.alt += self.rate * dt
         self._since_accept += dt
+        self._rate_age += dt
         # F = [[1, dt], [0, 1]]
         P = self.P
         p00 = P[0][0] + dt * (P[1][0] + P[0][1]) + dt * dt * P[1][1] + self.q_alt * dt
@@ -90,13 +97,32 @@ class AltitudeEstimator:
         self.P = [[p00, p01], [p10, p11]]
 
     # ---------------- 量测:DVL 垂向速度 ----------------
-    def update_rate(self, vz_up: float) -> None:
-        """用 DVL 垂向速度直接校正 rate(H = [0, 1])。vz_up 需已转成"向上为正"。"""
+    def update_rate(self, vz_up: float, r: float | None = None,
+                    gate_sigma: float = 5.0) -> bool:
+        """用垂向速度量测校正 rate(H = [0, 1])。vz_up 需已转成"向上为正"。
+
+        r: 量测噪声方差;缺省 `self.r_vz`(DVL vz)。
+          **深度计这一路请传 `self.r_vz_ekf`** —— 平底水池里 d(alt)/dt = -d(depth)/dt,
+          所以 `GLOBAL_POSITION_INT.vz` 取负就是本状态的直接量测。它约 26Hz、由
+          气压(1mm 分辨率/100ms 平均)与 IMU 互补得来(ArduSub 源码阅读 §1/§8.1),
+          比 4.5-7.5Hz 且 sigma>=0.1m/s 的 DVL vz 快一个档、准一个量级。
+          丢帧期间 predict() 的"惯性桥接"能不能用, 全看 rate 有没有被钉住。
+
+          注意只用**速率**不用绝对深度: ArduSub 的水面基准会在读数高于基准时被
+          `update_calibration()` 重新归零(§1.2), 绝对深度会阶跃, 而速率不受影响。
+
+        返回 True = 本次量测被采纳。
+        """
         if not self.initialized:
-            return
-        S = self.P[1][1] + self.r_vz
+            return False
+        if abs(vz_up) > self.max_rate:
+            return False                       # 坏帧/解析错误
+        R = self.r_vz if r is None else r
+        S = self.P[1][1] + R
         if S <= 0:
-            return
+            return False
+        if abs(vz_up - self.rate) > gate_sigma * (S ** 0.5):
+            return False                       # 速率外点
         k0 = self.P[0][1] / S
         k1 = self.P[1][1] / S
         y = vz_up - self.rate
@@ -107,6 +133,8 @@ class AltitudeEstimator:
         p10 = (1 - k1) * self.P[1][0]
         p11 = (1 - k1) * self.P[1][1]
         self.P = [[p00, p01], [p10, p11]]
+        self._rate_age = 0.0
+        return True
 
     # ---------------- 量测:DVL 高度(带门控与再基准) ----------------
     def update_alt(self, z: float) -> float:
@@ -175,4 +203,4 @@ class AltitudeEstimator:
         return AltEstimate(alt=self.alt, rate=self.rate,
                            initialized=self.initialized and self._since_accept <= self.max_coast_s,
                            reset_delta=reset_delta, rejected=self._rejected,
-                           age_s=self._since_accept)
+                           age_s=self._since_accept, rate_age_s=self._rate_age)

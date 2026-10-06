@@ -77,12 +77,17 @@ class FakeDvl:
 
     def _push_loop(self) -> None:
         period = 1.0 / self.rate_hz
-        t0 = time.monotonic()
+        t_prev = time.monotonic()
         while self._run:
             v = self.velocity_fn() or {}
+            now = time.monotonic()
+            # 真 A50 的 `time` = **距上一帧的毫秒数**(本帧速度的积分时长),
+            # 不是开机以来的累计时间。原来发累计值, 航位推算按它算会完全错位。
+            dt_ms = round((now - t_prev) * 1000, 1)
+            t_prev = now
             report = {
                 "type": "velocity",
-                "time": round((time.monotonic() - t0) * 1000, 1),
+                "time": dt_ms,
                 "vx": float(v.get("vx", 0.0)),
                 "vy": float(v.get("vy", 0.0)),
                 "vz": float(v.get("vz", 0.0)),

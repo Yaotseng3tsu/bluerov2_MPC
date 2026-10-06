@@ -64,11 +64,23 @@ class HeadingHold:
     def at_target(self, yaw_deg: float) -> bool:
         return abs(self.error_deg(yaw_deg)) <= self.tol_deg
 
-    def update(self, yaw_deg: float, dt: float) -> float:
-        """给当前 yaw(度) 与步长, 返回归一化 r 指令 (限幅后)。"""
+    def update(self, yaw_deg: float, dt: float,
+               rate_dps: float | None = None) -> float:
+        """给当前 yaw(度) 与步长, 返回归一化 r 指令 (限幅后)。
+
+        rate_dps: **实测偏航角速率**(度/s)。给了就用它算 D 项 ——
+          目标恒定时 d(err)/dt = -dψ/dt, 直接取负即可, 免去对角度做数值微分。
+          角度是会跳变的量(EKF 重对准), 微分它等于把跳变放大 1/dt 倍灌进 D 项;
+          ArduSub 自己的角速率 PID 吃的也是陀螺(get_gyro_latest), 不是微分出来的角度。
+          距离环早就这么做了(D 项直接用 DVL 实测 vx), 这里给航向环补齐。
+          不传则退回数值微分(仅离线自检用)。
+        """
         err = math.radians(self.error_deg(yaw_deg))
-        derr = 0.0 if (self._prev_err_rad is None or dt <= 0) \
-            else (err - self._prev_err_rad) / dt
+        if rate_dps is not None:
+            derr = -math.radians(rate_dps)
+        else:
+            derr = 0.0 if (self._prev_err_rad is None or dt <= 0) \
+                else (err - self._prev_err_rad) / dt
         self._prev_err_rad = err
         # 试探性积分(抗恒定扰动: 负浮力下垂直推力常年产生偏航反扭矩, 纯 PD 必留稳态误差)
         integ_try = self._integ + err * dt

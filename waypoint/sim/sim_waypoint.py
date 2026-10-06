@@ -85,6 +85,14 @@ def main() -> int:
     p.add_argument("--yaw-shift-deg", type=float, default=105.0, dest="yaw_shift_deg")
     p.add_argument("--yaw-glitch", type=float, default=0.0, dest="yaw_glitch",
                    help="注入 ATTITUDE 航向跳变的比例 (瞬时 +58°), 复现实测 EKF 跳变")
+    p.add_argument("--compass-reset-every", type=float, default=0.0,
+                   dest="compass_reset_every",
+                   help="每隔该秒数给回传航向再叠加一次随机重对准 (陀螺不变), "
+                        "复现 ArduSub 用罗盘重置 yaw 的行为")
+    p.add_argument("--compass-reset-deg", type=float, default=40.0,
+                   dest="compass_reset_deg", help="每次重对准的幅度上限 (度, 随机 ±)")
+    p.add_argument("--depth-noise", type=float, default=0.0, dest="depth_noise",
+                   help="GLOBAL_POSITION_INT 深度/垂向速度的高斯噪声 std (m 与 m/s)")
     p.add_argument("--dvl-dropout", type=float, default=0.0, dest="dvl_dropout",
                    help="注入 DVL 无解帧的比例 (真机实测 ~0.025), 用于验证容错")
     p.add_argument("--bottom", type=float, default=2.0,
@@ -110,6 +118,7 @@ def main() -> int:
     yaw = YawPlant(YawParams(), yaw_deg=args.yaw0)
 
     state = {"armed": False, "mode": MANUAL_MODE}
+    _creset = {"k": -1, "off": 0.0}      # 罗盘重置注入的累计偏移
 
     # 假 DVL: vx = surge 机体速度 (可加偏差模拟失配); 仿真恒有底锁
     dvl = None
@@ -211,8 +220,16 @@ def main() -> int:
                 send_heartbeat()
             if now - last_pos >= 0.1:
                 last_pos = now
+                # vz = EKF 垂向速度 (cm/s, 向下为正)。真机这一路由气压+IMU 互补得来,
+                # 平底水池里 -vz 就是离底高度的变化率 —— 高度估计器拿它当 rate 量测。
+                _vz_cm = int(round(depth.w * 100))
+                if args.depth_noise > 0:
+                    _vz_cm += int(round(_rnd.gauss(0.0, args.depth_noise * 100)))
+                _rel_mm = int(-depth.z * 1000)
+                if args.depth_noise > 0:
+                    _rel_mm += int(round(_rnd.gauss(0.0, args.depth_noise * 1000)))
                 mav.global_position_int_send(int(el * 1000), 356800000, 1396000000,
-                                             0, int(-depth.z * 1000), 0, 0, 0,
+                                             0, _rel_mm, 0, 0, _vz_cm,
                                              int(wrap_deg(math.degrees(yaw.yaw)) * 100) % 36000)
             if now - last_att >= 0.05:
                 last_att = now
@@ -221,6 +238,18 @@ def main() -> int:
                     # 持续参考系平移: 陀螺 yawspeed 不变(物理没转), 只有角度整体偏
                     yw = math.atan2(math.sin(yaw.yaw + math.radians(args.yaw_shift_deg)),
                                     math.cos(yaw.yaw + math.radians(args.yaw_shift_deg)))
+                if args.compass_reset_every > 0:
+                    k = int(el // args.compass_reset_every)
+                    if k != _creset["k"]:
+                        _creset["k"] = k
+                        if k > 0:
+                            _creset["off"] += _rnd.uniform(-args.compass_reset_deg,
+                                                           args.compass_reset_deg)
+                            print(f"[sitl] t={el:5.1f}s 罗盘重置 → 回传航向累计偏 "
+                                  f"{_creset['off']:+.1f}° (陀螺不变)")
+                    if _creset["off"]:
+                        yw = math.atan2(math.sin(yw + math.radians(_creset["off"])),
+                                        math.cos(yw + math.radians(_creset["off"])))
                 if args.yaw_glitch > 0 and _rnd.random() < args.yaw_glitch:
                     yw = math.atan2(math.sin(yaw.yaw + math.radians(58)),
                                     math.cos(yaw.yaw + math.radians(58)))  # 假跳变, 陀螺不变

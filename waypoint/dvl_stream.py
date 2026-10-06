@@ -50,6 +50,20 @@ class DvlSample:
     fom: float = -1.0        # figure of merit (越小越可信)
     t_mono: float = 0.0      # 收到该帧时的 monotonic 时刻
     age_s: float = 0.0       # latest() 计算时填充
+    dt_s: float = 0.0        # 本帧的积分时长 (报文 `time` 字段, ms -> s)
+
+
+@dataclass
+class DvlDisplacement:
+    """DVL 坐标系下的累计位移 (未乘 vx_sign, 由上层决定符号约定)。"""
+    x: float = 0.0           # m, 累计前向位移
+    y: float = 0.0
+    z: float = 0.0
+    dt_s: float = 0.0        # 累计积分时长
+    seq: int = 0             # 已累加的帧数 (上层据此判断"有没有新帧")
+    gap_s: float = 0.0       # 累计无解时长 (零阶保持或完全缺口)
+    n_valid: int = 0
+    n_total: int = 0
 
 
 def _load_dvl_cfg(path: Path = CONFIG_PATH) -> tuple[str, int]:
@@ -68,7 +82,7 @@ class DvlStream:
 
     def __init__(self, ip: str | None = None, port: int | None = None,
                  connect_timeout: float = 5.0, max_alt_rate: float = 1.5,
-                 alt_outlier_accept: int = 5):
+                 alt_outlier_accept: int = 5, zoh_max_s: float = 0.5):
         cip, cport = _load_dvl_cfg()
         self.ip = ip or cip
         self.port = port or cport
@@ -78,6 +92,16 @@ class DvlStream:
         self.max_alt_rate = max_alt_rate            # m/s, 超过即视为跳变
         self.alt_outlier_accept = alt_outlier_accept  # 连续这么多帧仍偏离 → 认账(真换地形)
         self._alt_outliers = 0
+        # 航位推算: 在**后台线程**里逐帧累加, 用报文自带的积分时长。
+        # 旧做法是在 10Hz 控制环里 `s += vx * dt_nom` —— DVL 只有 4.5-7.5Hz,
+        # 同一帧会被重复积分 1.3-2.2 次, 且用的是标称 dt 而不是实测步长。
+        # BlueOS 的 DVL 扩展算 VISION_POSITION_DELTA 时用的也是报文里的 dt (Dp = v*dt)。
+        self.zoh_max_s = zoh_max_s      # 无解帧最多按上一帧速度保持多久
+        self._disp = DvlDisplacement()
+        self._last_v = None             # 最近一帧好速度 (零阶保持用)
+        self._gap_run = 0.0             # 当前这段连续无解已持续多久
+        self._t_prev_frame = 0.0        # 上一帧到达时刻 (dt 兜底用)
+        self._alt_seq = 0               # 被接受的高度帧计数
         self._lock = threading.Lock()
         self._latest = DvlSample()
         # 最近一帧"有效"样本单独保留: A50 会间歇性解算失败(实测 ~2.5% 帧 valid=false/alt=-1,
@@ -133,6 +157,23 @@ class DvlStream:
             return
         if msg.get("type") != "velocity" and "velocity_valid" not in msg:
             return  # 只关心 velocity 报文 (忽略 dead_reckoning/transducer 等)
+        now = time.monotonic()
+        # A50 的 `time` 字段 = **距上一帧的毫秒数**(即这帧速度对应的积分时长)。
+        # 取值不在合理区间(固件差异/累计时间戳/丢报文)就退回墙钟差, 并钳位。
+        dt_s = None
+        raw = msg.get("time")
+        if raw is not None:
+            try:
+                v = float(raw) / 1000.0
+                if 0.005 <= v <= 1.0:
+                    dt_s = v
+            except (TypeError, ValueError):
+                dt_s = None
+        if dt_s is None:
+            dt_s = (now - self._t_prev_frame) if self._t_prev_frame else (1.0 / 7.0)
+            dt_s = min(max(dt_s, 0.005), 1.0)
+        self._t_prev_frame = now
+
         s = DvlSample(
             vx=float(msg.get("vx", 0.0)),
             vy=float(msg.get("vy", 0.0)),
@@ -140,10 +181,12 @@ class DvlStream:
             valid=bool(msg.get("velocity_valid", False)),
             altitude=float(msg.get("altitude", -1.0)),
             fom=float(msg.get("fom", -1.0)),
-            t_mono=time.monotonic(),
+            t_mono=now,
+            dt_s=dt_s,
         )
         with self._lock:
             self._latest = s
+            self._accumulate(s)
             if s.valid and s.altitude > 0:
                 prev = self._latest_valid
                 jump_ok = True
@@ -154,15 +197,60 @@ class DvlStream:
                 if jump_ok:
                     self._alt_outliers = 0
                     self._latest_valid = s
+                    self._alt_seq += 1
                 else:
                     # 跳变: 先丢弃; 若连续多帧都在新值附近, 说明是真的(例如越过台阶)
                     self._alt_outliers += 1
                     if self._alt_outliers >= self.alt_outlier_accept:
                         self._alt_outliers = 0
                         self._latest_valid = s
+                        self._alt_seq += 1
             self._n_frames += 1
 
+    def _accumulate(self, s: DvlSample) -> None:
+        """逐帧累加机体系位移 (调用方已持锁)。
+
+        无解帧 (~2.5%) 用上一帧好速度做零阶保持, 上限 `zoh_max_s`;
+        超过就只记缺口不再积分 —— 真丢底锁时继续按旧速度推会越积越错,
+        而控制环的 is_fresh(max_age) 本来就会先一步停车。
+        """
+        d = self._disp
+        d.n_total += 1
+        dt = s.dt_s
+        if s.valid:
+            d.x += s.vx * dt
+            d.y += s.vy * dt
+            d.z += s.vz * dt
+            d.dt_s += dt
+            d.seq += 1
+            d.n_valid += 1
+            self._last_v = (s.vx, s.vy, s.vz)
+            self._gap_run = 0.0
+            return
+        if self._last_v is not None and self._gap_run < self.zoh_max_s:
+            vx, vy, vz = self._last_v
+            d.x += vx * dt
+            d.y += vy * dt
+            d.z += vz * dt
+            d.dt_s += dt
+            d.seq += 1
+        self._gap_run += dt
+        d.gap_s += dt
+
     # ---------------- 取值接口 ----------------
+    def displacement(self) -> DvlDisplacement:
+        """累计位移的快照 (DVL 坐标系, 未乘 vx_sign)。上层取差分即为本段位移。"""
+        with self._lock:
+            d = self._disp
+            return DvlDisplacement(x=d.x, y=d.y, z=d.z, dt_s=d.dt_s, seq=d.seq,
+                                   gap_s=d.gap_s, n_valid=d.n_valid, n_total=d.n_total)
+
+    @property
+    def alt_seq(self) -> int:
+        """被接受的高度帧计数 —— 上层据此判断"本周期有没有新高度量测"。"""
+        with self._lock:
+            return self._alt_seq
+
     def latest(self) -> DvlSample:
         """返回最近一帧的拷贝,age_s 填为当前龄期 (秒)。"""
         with self._lock:

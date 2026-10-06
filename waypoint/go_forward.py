@@ -45,8 +45,8 @@ for _s in (sys.stdout, sys.stderr):
 from src.pseudo_stick import PseudoStick, load_config  # noqa: E402
 from src.pid import PID  # noqa: E402
 from waypoint.dvl_stream import DvlStream  # noqa: E402
-from waypoint.heading_hold import HeadingHold, wrap_deg  # noqa: E402
-from waypoint.altitude_estimator import AltitudeEstimator  # noqa: E402
+from waypoint.heading_hold import HeadingHold  # noqa: E402
+from waypoint.nav_state import NavState  # noqa: E402
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
 
@@ -91,14 +91,17 @@ def main(argv=None) -> int:
     ap.add_argument("--heading", type=float, default=None,
                     help="要保持的绝对航向(度);默认=解锁时的当前航向")
     ap.add_argument("--no-yaw", action="store_true", help="关闭航向控制")
-    ap.add_argument("--yaw-jump-dps", type=float, default=120.0, dest="yaw_jump_dps",
-                    help="航向跳变剔除阈值(度/秒)。实测 EKF 会瞬间跳 58°(145°/s),"
-                         "控制器当真后猛打舵把机器人抡起来。用陀螺 yawspeed 交叉校验")
+    ap.add_argument("--yaw-tau", type=float, default=120.0, dest="yaw_tau",
+                    help="绝对航向(罗盘)对陀螺积分的修正时间常数(s)。0=纯陀螺。"
+                         "池内磁场不稳, 默认取大值: 60s 航程内罗盘漂移只带进约 3°")
+    ap.add_argument("--yaw-gate-deg", type=float, default=12.0, dest="yaw_gate_deg",
+                    help="绝对航向新息门限(度)。因为航向已由陀螺推进, 门限是固定角度, "
+                         "不随 dt 膨胀(旧实现两次栽在这)")
     ap.add_argument("--yaw-accept-n", type=int, default=5, dest="yaw_accept_n",
-                    help="航向跳变连续这么多帧仍偏离 → 认定为参考系平移(而非尖刺),"
-                         "此时平移目标而不是打舵去追")
+                    help="连续这么多帧超门限 → 判为 EKF 重对准, 只平移参考系偏置, "
+                         "航向估计与控制目标都不动")
     ap.add_argument("--yaw-stale", type=float, default=1.5, dest="yaw_stale",
-                    help="航向连续被剔除超过该秒数 → 停用航向控制(不拿坏估计驱动推进器)")
+                    help="收不到 ATTITUDE 超过该秒数 → 停用航向控制(不拿坏估计驱动推进器)")
     # --- 阶段/容差 ---
     ap.add_argument("--alt-tol", type=float, default=0.06, dest="alt_tol",
                     help="高度到位容差 (m)")
@@ -117,6 +120,8 @@ def main(argv=None) -> int:
     ap.add_argument("--vx-sign", type=float, default=1.0, dest="vx_sign",
                     help="DVL vx 前进符号 (+1/-1)")
     ap.add_argument("--max-age", type=float, default=1.0, dest="max_age")
+    ap.add_argument("--no-depth", action="store_true",
+                    help="不使用飞控深度/EKF 垂向速度, 高度速率退回 DVL vz(降级用)")
     ap.add_argument("--umax", type=float, default=1.0)
     ap.add_argument("--seconds", type=float, default=180.0, help="总超时")
     # --- 运行 ---
@@ -149,61 +154,21 @@ def main(argv=None) -> int:
     conn = stick.conn
     # 粗过滤交给估计器(新息门控优于固定变化率阈值)
     dvl = DvlStream(ip=args.dvl_ip, port=args.dvl_port, max_alt_rate=1e9).start()
-    est_alt = AltitudeEstimator()
-
-    yaw_deg = None
-    yaw_t = None
-    yaw_bad_since = None
-    yaw_bad_n = 0
+    # 导航估计集中到 NavState: 高度(DVL 慢变基准 + 深度计快通道)、
+    # 航向(陀螺积分 + 罗盘慢速对齐)、前向位移(DVL 逐帧按自带 dt 推算)。
+    nav = NavState(conn, dvl, vx_sign=args.vx_sign, hz=hz,
+                   use_depth=not args.no_depth,
+                   yaw_tau=args.yaw_tau, yaw_gate_deg=args.yaw_gate_deg,
+                   yaw_accept_n=args.yaw_accept_n, yaw_stale=args.yaw_stale)
     yaw_frozen = False
-
-    def drain_attitude():
-        """抽干 MAVLink, 取最新 ATTITUDE.yaw, 并剔除非物理的跳变。
-
-        判据: 用同一条报文里的陀螺 yawspeed 交叉校验 —— 角度跳了几十度而陀螺说没转,
-        必是航向估计跳变(EKF 重对准/罗盘干扰), 不是真运动。不剔除的话控制器会
-        对着假误差猛打舵, 把机器人真的抡起来(2026-09-17 实测)。
-        """
-        nonlocal yaw_deg, yaw_t, yaw_bad_since, yaw_bad_n
-        import math as _m
-        while True:
-            m = conn.recv_match(type="ATTITUDE", blocking=False)
-            if m is None:
-                break
-            y = wrap_deg(_m.degrees(m.yaw))
-            rate_dps = abs(_m.degrees(m.yawspeed))
-            now = time.monotonic()
-            if yaw_deg is not None and yaw_t is not None:
-                # dt 必须钳位: 否则被拒期间 yaw_t 不更新 → dt 变大 → allow 变大,
-                # 跳变过约 1s 就会被"合法"采纳(实测 105° 跳变即如此漏过)。
-                dt_eff = min(max(1e-3, now - yaw_t), 0.2)
-                delta = wrap_deg(y - yaw_deg)
-                allow = max(8.0, (rate_dps + args.yaw_jump_dps) * dt_eff)
-                if abs(delta) > allow:
-                    yaw_bad_n += 1
-                    if yaw_bad_since is None:
-                        yaw_bad_since = now
-                    if yaw_bad_n < args.yaw_accept_n:
-                        continue      # 瞬时尖刺: 丢弃, 沿用上一个好航向
-                    # 持续偏离 = 航向**参考系**整体平移(EKF 重对准), 物理指向并没变。
-                    # 正确反应是把目标同量平移, 而不是去追那 100 多度 —— 后者会满舵抡机器人。
-                    hh.target_deg = wrap_deg(hh.target_deg + delta)
-                    hh._integ = 0.0
-                    hh._prev_err_rad = None
-                    print(f"[fwd] ⚠ 航向参考跳变 {delta:+.0f}° → 目标同量平移至 "
-                          f"{hh.target_deg:.1f}°(物理指向不变, 不打舵追)")
-            yaw_bad_since = None
-            yaw_bad_n = 0
-            yaw_deg = y
-            yaw_t = now
 
     DATA_DIR.mkdir(exist_ok=True)
     csv_path = DATA_DIR / f"go_forward_{args.label}.csv"
     rows = []
 
-    alt_prev = t_prev = None
     alt_rate = 0.0
     s = 0.0                 # 已走距离 (航位推算)
+    fwd0 = 0.0              # 进入 ADVANCE 时的累计位移基准
     phase = "HOLD"
     hold_cnt = 0
     wrong_dir = 0          # 推前进却后退的连续计数 (vx_sign 自检)
@@ -215,6 +180,9 @@ def main(argv=None) -> int:
     try:
         if not stick.wait_heartbeat(float(cfg["connection"].get("heartbeat_timeout_s", 10))):
             return 1
+        # 解锁前就把两条数据流开起来: 航向要靠 ATTITUDE 的陀螺积分,
+        # 高度的快通道要靠 GLOBAL_POSITION_INT 的深度/垂向速度。
+        nav.request_streams()
         print("[fwd] 等待 DVL 底锁 ...")
         t_w = time.monotonic() + 8.0
         while time.monotonic() < t_w and not dvl.is_fresh(args.max_age):
@@ -228,6 +196,9 @@ def main(argv=None) -> int:
         print(f"[fwd] 高度PID kp{args.alt_kp}/ki{args.alt_ki}/kd{args.alt_kd} bias{args.u_bias} | "
               f"距离PID kp{args.x_kp}/ki{args.x_ki}/kd{args.x_kd} 限幅{args.x_limit} | "
               f"护栏 max_dist={max_dist:.2f}m vx_sign={args.vx_sign:+.0f}")
+        print(f"[fwd] 导航: 高度={'DVL+深度计' if not args.no_depth else 'DVL only'} | "
+              f"航向=陀螺积分, 罗盘 tau={args.yaw_tau:.0f}s 门限{args.yaw_gate_deg:.0f}° | "
+              f"距离=DVL 逐帧 dt 推算")
 
         if stick.warn_if_rival() and not args.yes:
             if input("[fwd] 仍要继续? 输入 yes: ").strip().lower() != "yes":
@@ -238,39 +209,35 @@ def main(argv=None) -> int:
                 print("[fwd] 已取消。")
                 return 0
 
-        # 预热估计器: 解锁前先喂几帧, 避免控制开始时估计未初始化(返回 0)
-        # 导致头一两个周期对着 0 算出满推。
-        for _ in range(12):
-            _s = dvl.latest_valid()
-            if _s.initialized if hasattr(_s, "initialized") else (_s.altitude > 0):
-                est_alt.predict(dt_nom)
-                est_alt.update_alt(_s.altitude)
-            time.sleep(dt_nom)
+        # 解锁前预热: 高度估计器未初始化时返回 0, 控制头一两个周期会对着 0 算满推。
+        # 顺带等航向跟踪器也初始化, 这样解锁时锁定的航向是真的。
+        fix = nav.prime(seconds=3.0, need_heading=not args.no_yaw)
+        if not fix.alt_ok:
+            print("[fwd] ❌ 高度估计未能初始化(DVL 数据不足), 中止。")
+            return 1
+        if args.no_depth or fix.depth is None:
+            print("[fwd] ⚠ 未使用深度计快通道, 高度速率退回 DVL vz")
+        else:
+            print(f"[fwd] 深度计快通道 OK  depth={fix.depth:.3f}m "
+                  f"vz={fix.depth_rate:+.3f}m/s")
 
         stick.set_mode(args.mode)
         time.sleep(0.3)
         if not stick.arm():
             return 2
 
-        # 请求 ATTITUDE 并锁定要保持的航向
+        # 锁定要保持的航向 (用我们自己的陀螺积分航向, 不是飞控那个会被罗盘重置的 yaw)
         if not args.no_yaw:
-            from pymavlink import mavutil as _mv
-            conn.mav.command_long_send(
-                conn.target_system, conn.target_component,
-                _mv.mavlink.MAV_CMD_SET_MESSAGE_INTERVAL, 0,
-                float(_mv.mavlink.MAVLINK_MSG_ID_ATTITUDE), 5e4, 0, 0, 0, 0, 0)
-            t_y = time.monotonic() + 3.0
-            while time.monotonic() < t_y and yaw_deg is None:
-                drain_attitude(); time.sleep(0.05)
-            if yaw_deg is None:
+            fix = nav.update()
+            if not fix.heading_ok or fix.heading_deg is None:
                 print("[fwd] ⚠ 收不到 ATTITUDE, 本次关闭航向控制")
                 args.no_yaw = True
             else:
-                hh.reset(args.heading if args.heading is not None else yaw_deg)
-                print(f"[fwd] 航向锁定 = {hh.target_deg:.1f}° (当前 {yaw_deg:.1f}°)")
+                hh.reset(args.heading if args.heading is not None else fix.heading_deg)
+                print(f"[fwd] 航向锁定 = {hh.target_deg:.1f}° (当前 {fix.heading_deg:.1f}°)")
 
         t0 = time.monotonic()
-        sp_alt = dvl.latest_valid().altitude
+        sp_alt = fix.alt
         sp_dist = 0.0
         alt_guard = (sp_alt >= args.alt_min + 0.05)
         last_print = 0.0
@@ -281,24 +248,24 @@ def main(argv=None) -> int:
             if el >= args.seconds:
                 stop_reason = "总超时"; stick.send_neutral(); break
 
-            # --- DVL ---
+            # --- 导航估计 (高度 / 航向 / 位移 一次算齐) ---
+            fix = nav.update()
+            dt = fix.dt
             if not dvl.is_fresh(args.max_age):
                 stick.send_neutral(); stop_reason = "DVL 丢底锁/超龄"; break
-            d = dvl.latest_valid()
-            vx = d.vx * args.vx_sign
-
-            # --- 高度估计(对齐 ArduSub: 控制器吃估计值而非原始传感器) ---
-            est_alt.predict(dt_nom)                 # 丢帧时按速率外推, 不冻结
-            if d.age_s <= dt_nom * 1.5:             # 本周期有新帧
-                est_alt.update_rate(-d.vz)          # DVL vz 向下为正 → 取负
-                rb = est_alt.update_alt(d.altitude)
-                if rb:
-                    # 与 yaw 不同: 高度是真的变了, 目标不平移;
-                    # 清积分避免冲击, 由 --alt-slew/--alt-lag 平滑跟进
-                    pid_z.integ = 0.0
-                    print(f"[fwd] ⚠ 高度基准跳变 {rb:+.2f}m → 清积分, 由斜坡跟进")
-            _e = est_alt.estimate()
-            alt, alt_rate = _e.alt, _e.rate
+            if not fix.alt_ok:
+                stick.send_neutral(); stop_reason = "高度估计失效(无量测可用)"; break
+            alt, alt_rate, vx = fix.alt, fix.alt_rate, fix.vx
+            if fix.alt_reset_delta:
+                # 与 yaw 不同: 高度是真的变了, 目标不平移;
+                # 清积分避免冲击, 由 --alt-slew/--alt-lag 平滑跟进
+                pid_z.integ = 0.0
+                print(f"[fwd] ⚠ 高度基准跳变 {fix.alt_reset_delta:+.2f}m → 清积分, 由斜坡跟进")
+            if fix.heading_realign_deg:
+                # 航向参考系整体平移: 跟踪器已把偏置吸收掉, 航向估计与目标都没动,
+                # 控制器这边无需任何动作 —— 只记一笔, 事后对数据时好查。
+                print(f"[fwd] ⚠ 罗盘/EKF 重对准 {fix.heading_realign_deg:+.0f}° "
+                      f"→ 已吸收进参考系偏置(第 {fix.heading_realign_n} 次), 不打舵")
 
             # --- 安全 ---
             if not alt_guard and alt >= args.alt_min + 0.05:
@@ -320,11 +287,11 @@ def main(argv=None) -> int:
                 # 设定值节流: 实测跟不上时就不再推进设定值, 避免 sp 跑到机器人前面
                 # (实测从池底起浮时 sp 已到 0.80 而 alt 才 0.50 → 超调到 0.958)
                 if abs(sp_alt - alt) <= args.alt_lag:
-                    st = args.alt_slew * dt_nom
+                    st = args.alt_slew * dt
                     sp_alt += max(-st, min(st, args.alt - sp_alt))
             else:
                 sp_alt = args.alt
-            u_pid_z = pid_z.compute(-sp_alt, -alt, -alt_rate, dt_nom)
+            u_pid_z = pid_z.compute(-sp_alt, -alt, -alt_rate, dt)
             u_raw = args.u_bias + u_pid_z
             u_z = max(-1.0, min(1.0, u_raw))
             if u_z != u_raw and pid_z.Ki > 0:
@@ -338,6 +305,7 @@ def main(argv=None) -> int:
                     if hold_cnt >= int(args.hold_settle * hz):
                         phase = "ADVANCE"
                         pid_x.reset()
+                        fwd0 = fix.fwd_m          # 位移基准: 之后 s = 累计位移 - 基准
                         print(f"[fwd] ▶ 高度已稳({alt:.3f}m),开始前进 {args.dist:.2f}m")
                 else:
                     hold_cnt = 0
@@ -355,26 +323,29 @@ def main(argv=None) -> int:
                         break
                 else:
                     wrong_dir = 0
-                s += vx * dt_nom                       # 航位推算
+                # 航位推算: DVL 在后台线程里按**报文自带的积分时长**逐帧累加,
+                # 这里只取差分。旧做法 `s += vx * dt_nom` 是在 10Hz 环里重积分一个
+                # 4.5-7.5Hz 的零阶保持量, 同一帧会被数 1.3-2.2 次。
+                s = fix.fwd_m - fwd0
                 # 设定值节流: 只有机器人跟得上(滞后 < max_lag)才继续推进设定值。
                 # 实测 v_cruise=0.15 但机器人只有 ~0.06m/s → sp 跑到 2.0 而 s 才 0.90,
                 # 误差被拉到 1.1m、u_x 常年顶死限幅。节流后自动适配机器人真实速度。
                 if sp_dist - s <= args.max_lag:
-                    st = args.v_cruise * dt_nom
+                    st = args.v_cruise * dt
                     sp_dist = min(args.dist, sp_dist + st)
                 # 速度前馈: 设定值还在往前推 = 期望以 v_cruise 巡航 → 直接给维持该速度的指令,
                 # 跨过推力门槛(实测 u_x<0.5 几乎不动); 设定值到目标后归零, 让 PID 能反推刹车。
                 ff_tgt = args.x_ff if sp_dist < args.dist - 1e-6 else 0.0
                 ff += 0.05 * (ff_tgt - ff)      # 平滑: 前馈突然归零会像阶跃扰动, 导致反推过头
-                u_x = ff + pid_x.compute(sp_dist, s, vx, dt_nom)
+                u_x = ff + pid_x.compute(sp_dist, s, vx, dt)
                 if s >= args.dist - args.dist_tol and sp_dist >= args.dist - 1e-6:
                     phase = "DONE"; done_t0 = cyc; u_x = 0.0
                     print(f"[fwd] ✔ 已到距 s={s:.3f}m,停前进,继续定高 {args.done_hold:.0f}s")
 
             else:  # DONE:距离 PID 继续以 dist 为目标 → 滑行超出即反推刹车并稳住位置
-                s += vx * dt_nom
+                s = fix.fwd_m - fwd0
                 ff += 0.05 * (0.0 - ff)
-                u_x = ff + pid_x.compute(args.dist, s, vx, dt_nom)
+                u_x = ff + pid_x.compute(args.dist, s, vx, dt)
                 if cyc - done_t0 >= args.done_hold:
                     break
 
@@ -385,18 +356,22 @@ def main(argv=None) -> int:
             u_x_prev = u_x
 
             # --- 航向 PID (第三路) ---
+            # 航向由 NavState 的陀螺积分给出, 不受罗盘/EKF 重对准影响;
+            # D 项直接吃实测角速率, 不对角度做数值微分。
             u_r = 0.0
+            yaw_now = fix.heading_deg
             if not args.no_yaw:
-                drain_attitude()
-                if yaw_bad_since is not None and (cyc - yaw_bad_since) > args.yaw_stale:
+                if not fix.heading_ok:
                     if not yaw_frozen:
                         yaw_frozen = True
-                        print(f"[fwd] ⚠ 航向估计持续跳变 >{args.yaw_stale}s → 停用航向控制"
+                        print(f"[fwd] ⚠ 收不到 ATTITUDE >{args.yaw_stale}s → 停用航向控制"
                               f"(u_r=0), 不用坏估计驱动推进器")
-                elif yaw_bad_since is None:
-                    yaw_frozen = False
-                if yaw_deg is not None and not yaw_frozen:
-                    u_r = hh.update(yaw_deg, dt_nom)
+                else:
+                    if yaw_frozen:
+                        yaw_frozen = False
+                        hh._prev_err_rad = None
+                        print("[fwd] ATTITUDE 恢复 → 重新启用航向控制")
+                    u_r = hh.update(yaw_now, dt, rate_dps=fix.heading_rate_dps)
 
             stick.send(x=u_x, z=u_z, r=u_r)
             if int(el * hz) % int(hz) == 0:
@@ -405,13 +380,21 @@ def main(argv=None) -> int:
             rows.append([round(el, 3), phase, round(sp_alt, 4), round(alt, 4),
                          round(u_z, 4), round(sp_dist, 4), round(s, 4),
                          round(vx, 4), round(u_x, 4),
-                         round(yaw_deg, 2) if yaw_deg is not None else "",
-                         round(hh.error_deg(yaw_deg), 2) if (yaw_deg is not None and not args.no_yaw) else "",
-                         round(u_r, 4)])
+                         round(yaw_now, 2) if yaw_now is not None else "",
+                         round(hh.error_deg(yaw_now), 2) if (yaw_now is not None and not args.no_yaw) else "",
+                         round(u_r, 4),
+                         # 新增列(便于事后核对导航): 高度速率 / 深度 / 是否用了深度计快通道 /
+                         # 航向参考系偏置 / 累计重对准次数 / 实测步长
+                         round(alt_rate, 4),
+                         round(fix.depth, 4) if fix.depth is not None else "",
+                         1 if fix.depth_used else 0,
+                         round(fix.heading_offset_deg, 2),
+                         fix.heading_realign_n,
+                         round(dt, 4)])
             if el - last_print >= 0.5:
                 last_print = el
-                ystr = (f" | yaw={yaw_deg:+.1f} err={hh.error_deg(yaw_deg):+.1f} u_r={u_r:+.2f}"
-                        if (yaw_deg is not None and not args.no_yaw) else "")
+                ystr = (f" | yaw={yaw_now:+.1f} err={hh.error_deg(yaw_now):+.1f} u_r={u_r:+.2f}"
+                        if (yaw_now is not None and not args.no_yaw) else "")
                 print(f"  t={el:5.1f} [{phase:7s}] alt={alt:.3f}/{args.alt:.2f} u_z={u_z:+.3f} | "
                       f"s={s:.3f}/{args.dist:.2f} (sp{sp_dist:.2f}) vx={vx:+.3f} u_x={u_x:+.3f}{ystr}")
 
@@ -452,7 +435,8 @@ def main(argv=None) -> int:
         with open(csv_path, "w", newline="", encoding="utf-8") as f:
             w = csv.writer(f)
             w.writerow(["t", "phase", "sp_alt", "alt", "u_z", "sp_dist", "s", "vx", "u_x",
-                        "yaw", "yaw_err", "u_r"])
+                        "yaw", "yaw_err", "u_r",
+                        "alt_rate", "depth", "depth_used", "yaw_off", "realign_n", "dt"])
             w.writerows(rows)
         print(f"[fwd] 已保存 {csv_path} ({len(rows)} 行)")
 
