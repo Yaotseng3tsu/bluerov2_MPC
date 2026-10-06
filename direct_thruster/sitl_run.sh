@@ -39,6 +39,14 @@ mkdir -p "$RUNDIR"
 cd "$RUNDIR" || exit 2
 rm -f eeprom.bin dataflash.bin sitl.log accept.log
 
+# 把 parm 和验收脚本拷进 WSL 自己的文件系统再用。跑的过程中完全不碰 /mnt/c:
+# 9p 的访问会被 Windows 侧(杀毒实时扫描等)拖住, 而本验收全靠计时, 进程被冻结
+# 数秒就会让 SITL 的 millis() 跳过 MOT_EXT_TMOUT, 看门狗正确锁存 -> 一堆假失败。
+cp -f "$EXT_PARM" "$RUNDIR/sitl_ext.parm" || exit 2
+cp -f "$ACCEPT"   "$RUNDIR/sitl_accept.py" || exit 2
+EXT_PARM="$RUNDIR/sitl_ext.parm"
+ACCEPT="$RUNDIR/sitl_accept.py"
+
 echo "[run] 启动 SITL (FRAME_CONFIG=2, 擦 eeprom) ..."
 setsid "$BIN" -w -S -I0 --model vectored_6dof \
     --defaults "$BASE_PARM,$EXT_PARM" \

@@ -58,7 +58,7 @@ python3 ./waf sub -j4
 | **M1** 构建环境 | 完成 | 见 §3 |
 | **M2** vanilla 编译+装机验证 | 完成 | 刷入**未改动**的自编译版 → heartbeat / 参数 / IMU 20Hz / 8 路恒 1500 全绿 → **glibc 与工具链兼容风险已排除** |
 | **M3** C++ 实现 | 完成 | 编译通过，**从未刷机**。fork commit `d88e653`；diff 存 `patches/0001-external-8ch-thrust.patch`（7 文件 +214 行） |
-| **M4** SITL 验收 | **进行中** | 见 §7 |
+| **M4** SITL 验收 | 完成 | 2026-10-07 官方 SITL **14/14 通过**（A 未解锁不动桨 / B 八路逐一独立 + 推力标度 + 负向 / C 看门狗归中+disarm+告警+锁存 / D 四类拒收 + 按流程恢复）。见 §7 |
 
 ### M2 的关键订正（务必记住）
 
@@ -130,41 +130,71 @@ output_to_motors()
 
 ---
 
-## 7. 当前进度：M4（SITL 验收）未完成
+## 7. M4（官方 SITL 验收）— ✅ 14/14 通过（2026-10-07）
 
-**第一次跑 0/11 通过，但诊断结论是：固件功能正常，失败的是测试脚本。**
-证据：`[D2] SERVO3=[1500, 1740]` —— 外部命令**确实驱动了 Motor3**。
-
-测试脚本 `direct_thruster/sitl_accept.py` 的四个问题（已部分修复）：
-
-1. **SITL 默认是 6 推进器 Vectored 帧**，不是 Heavy → `SERVO7` 读数恒为 0，把"全中位"判据带崩 → **需要用 `FRAME_CONFIG=2` 起 SITL**
-2. **两项测试之间空档超过 500ms，会让看门狗提前触发并锁存** → 后续测试被"正确地"拒绝，看起来像功能坏了（**这其实反证了看门狗在工作**）→ **每项测试前必须 `reset_ext()` 清锁存**
-3. 开机 STATUSTEXT 抓不到（我们是 SITL 启动之后才连上的）→ 应降级为信息项，真正验证留到刷机后
-4. 启动瞬态（读数 1000）污染了 A 项 → 需要 settle 延时
-
-**2026-10-06 已重建验收台**（细节见 [PROGRESS.md](PROGRESS.md) 的 M4 条目）：新增 `sitl_ext.parm`（`FRAME_CONFIG=2` / `SR0_RC_CHAN=20` 等）、`sitl_run.sh`（一键起 SITL + 跑验收）、`.gitattributes`（`*.sh`/`*.parm` 强制 LF），并重写 `sitl_accept.py`（14 条计分项，前置条件改为硬 abort）。**但尚未运行 —— M4 要等这一跑全绿才算过。**
-
-> 同时修掉了一个会让重跑必然再失败的点：原 `reset_ext()` 直接 `MOT_EXT_ENABLE 0→1`，而固件里清 `_ext_have_cmd` 的 `clear_external_thrust()` **只在看门狗真正触发时**才被调用，于是重新使能那一瞬 `external_thrust_timed_out()` 立刻为真、当场重新锁存。正确顺序是**先让看门狗在 ENABLE 还开着时打一次**，再 `0→1`。
-
-**SITL 运行方法（已验证可用）**：
+一条命令复现：
 
 ```bash
-# 一条命令搞定（WSL 内）。SITL 与测试脚本必须在同一个 shell 会话里，会话一结束
-# SITL 就会被杀 —— sitl_run.sh 已把这件事连同 FRAME_CONFIG=2、擦 eeprom 一起封好。
+# SITL 与测试脚本必须在同一个 shell 会话里，会话一结束 SITL 就会被杀 ——
+# sitl_run.sh 已把这件事连同 FRAME_CONFIG=2、SERVOn_FUNCTION、擦 eeprom 一起封好。
 bash /mnt/c/bluerov2_mpc/direct_thruster/sitl_run.sh
 ```
 
-### 下一步具体任务
+| 项 | 结果 |
+|---|---|
+| **A** 未解锁时发 0.6×8 | 8 路恒 1500 ✅（结构性保证：`output_to_motors()` 在 SHUT_DOWN 下硬写 1500） |
+| **B1–B3** 单路 / 标度 / 负向 | SERVO3 → 1740（=1500+0.6×400）、−0.6 → 1260 ✅ |
+| **B4** 八路逐一扫描 | 八路各自给 0.5 → 对应 SERVO 到 1700、其余七路恒 1500 ✅ **（这条就是本线的目标本身）** |
+| **C1–C4** 看门狗 | 归中 / 自动 disarm / `Lost external thrust commands` / 锁存期间合法命令也被拒 ✅ |
+| **D1–D5** 拒收与恢复 | 错 group / NaN / 越范围 / 错 target_system 四类整帧拒收；清 `MOT_EXT_ENABLE` 再开后恢复可控 ✅ |
 
-1. **跑 `bash direct_thruster/sitl_run.sh`**（验收台已重建完，就差这一跑）。四项验收：
-   - **A** 未解锁时发非零命令 → 8 路恒 1500
-   - **B** 只给 Motor3 → 只有 SERVO3 离开中位，其余恒 1500
-   - **C** 停发命令（心跳仍在）→ 归中 + disarm + 锁存 + 告警 STATUSTEXT
-   - **D** 非法/越权拒收：错误 group / NaN / 超范围 / 锁存期间合法命令也拒绝 / 清 `MOT_EXT_ENABLE` 后恢复可控
-2. SITL 全绿 → 提交并记录进 **`direct_thruster/PROGRESS.md`**（本线的进度写这里；仓库根的 `PROGRESS.md` 归 waypoint 线独占，别往那里追加）
-3. 之后才谈：刷改版固件（**需用户显式同意**）→ 干测（用 `servo_monitor` 验 8 路独立）→ 写上位机 `external_thruster.py`（发 `SET_ACTUATOR_CONTROL_TARGET`，复用 `pseudo_stick` 的看门狗/退出归中+自动上锁范式）→ 水下
+**SITL 通过证明了什么**：接口约定（`group_mlx=1`）、整帧校验、绕过混控的替换点、`_motor_reverse` 与限幅、
+spool 门控、看门狗+锁存+恢复流程，这些**逻辑**在真实 ArduSub 代码里按设计工作。
 
----
+**SITL 没有证明的**（刷机后仍须验）：Navigator 板上的真实 PWM 输出时序、ESC 响应、推力标定
+（`[-1,1]` → 牛顿）、以及任何水动力。
+
+### 走到 14/14 用了四轮，根因全部在测试台与环境，固件 C++ 一行未改
+
+| 轮次 | 结果 | 根因 |
+|---|---|---|
+| 1 | 0/11 | SITL 默认 6 推进器帧 → Motor7/8 未使能、SERVO7/8 恒 0，把所有"全中位"判据整体带崩 |
+| 2 | 11/14 | `reset_ext()` 竞态（见下）；拒收类测试落回原混控而 SITL 无人喂 RC；窗口切换时上一窗口残留报文串扰 |
+| 3 | 11/14 | **墙钟跳变**（见下）伪造出"链路空洞" |
+| 4 | 13/14 | **`SERVO8_FUNCTION` 不是 Motor8**（见下）→ Motor8 没有输出通道 |
+
+三个值得单独记住的坑：
+
+1. **`reset_ext()` 的竞态**。固件里"解锁存"和"清残留命令"是两条独立路径：`clear_external_fault()`
+   只在 `MOT_EXT_ENABLE==0` 时被 50Hz 检查调用，而清 `_ext_have_cmd` 的 `clear_external_thrust()`
+   **只在看门狗真正触发时**调用。所以不能直接 `ENABLE 0→1`：那一瞬 `external_thrust_timed_out()`
+   立即为真 → 20ms 内当场重新锁存，后续测试全被"正确地"拒绝。
+   正确顺序：**先让看门狗在 ENABLE 还开着时打一次**（它会清掉 `_ext_have_cmd`），再 `0→1`。
+2. **WSL2 的墙钟会前后跳 ±7.9 秒**（实测，约每 15 秒一次）。用 `time.time()` 量时间间隔会量出
+   不存在的"数秒空洞"，进而伪装成功能失败。**计时一律用 `time.monotonic()`。**
+   判别方法：同时统计"收包间隔"和"自己循环的间隔"——两者都大 = 真卡住；只有前者大 = 链路问题；
+   墙钟与单调钟的差 = 时钟跳变。本脚本三项都打在每条判据的详情里。
+3. **SITL 必须钉死 `SERVO1..8_FUNCTION = 33..40`**（`k_motor1..k_motor8`）。`add_motor_num()` 只用
+   `set_aux_channel_default()` 装**默认值**，被 `sub.parm` 显式设过的 `SERVOn_FUNCTION` 会赢 →
+   那个电机**根本没有输出通道**，而对应 SERVO 显示的是别的功能、恰好停在 1500，看起来就像
+   "这一路驱动不了"。实机 M0 基线本来就是 SERVO1–8 = Motor1–8，所以这也是让 SITL 对齐实机。
+
+验收台由三个文件组成：`sitl_ext.parm`（SITL 追加默认参数）、`sitl_run.sh`（一键起停）、
+`sitl_accept.py`（14 条计分项）。**前置条件一律硬 abort**——改版参数在位 / `FRAME_CONFIG==2` /
+`SERVO1-8_FUNCTION==33..40` / 电机通道=={1..8} / 基线全中位。第一轮 0/11 的教训就是前提错了还
+照常跑完，产出一堆看不懂的 FAIL。
+
+### 下一步
+
+1. **M5 刷改版固件**（**需用户显式同意**；排在 waypoint 收尾之后；拆桨隔离这一条用户已于
+   2026-10-06 放宽）。刷完必 `RESTART AUTOPILOT`，判据 = `fc_info.py` 的 uptime 归零；
+   这次还能用开机 STATUSTEXT `EXT-THRUSTER build...` 直接确认跑的是哪份。
+2. **干测**：`servo_monitor.py` 看 8 路输出，重跑 B4 那套逐一扫描。
+   建议首轮用小幅度短点动（±0.1、每次 1 秒）而不是 0.5——直控层没有混控兜底，单桨满推时整机会在台面上移动。
+3. **上位机 `external_thruster.py`**：发 `SET_ACTUATOR_CONTROL_TARGET`，复用 `pseudo_stick` 的
+   看门狗 / 退出归中 + 自动上锁范式。
+4. **推力标定**：把分配器的 fᵢ（牛顿）映射到接口的 `[-1,1]`。
+5. 之后才是水下。
 
 ## 8. 线 A waypoint 现状（背景信息，勿改动其代码）
 
@@ -185,3 +215,5 @@ bash /mnt/c/bluerov2_mpc/direct_thruster/sitl_run.sh
 - MAVLink 要锁定真飞控心跳，否则 sys=0 读不到参数
 - 刷机后必须 RESTART 并看 uptime
 - SITL 与测试脚本要在同一个 WSL 会话；python 加 `-u`
+- **WSL2 墙钟会前后跳 ±8 秒** → 任何计时一律用 `time.monotonic()`，别用 `time.time()`
+- SITL 要钉死 `SERVO1..8_FUNCTION=33..40`，否则 `sub.parm` 的显式值会抢走电机的输出通道
