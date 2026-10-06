@@ -112,8 +112,8 @@ output_to_motors()
 
 **安全与时序**
 
-- **编译不碰 ROV（随时可做）；刷机才碰 ROV** → 刷任何自编译固件必须排在 waypoint 收尾之后 + **用户显式同意** + 未解锁 + **物理隔离推进器**
-- 隔离方式推荐 **拆螺旋桨**：电子舱与 ESC **共用同一块电池**，**不能靠拔电池隔离**（拔了 BlueOS 就没了，根本刷不了）
+- **编译不碰 ROV（随时可做）；刷机才碰 ROV** → 刷任何自编译固件必须排在 waypoint 收尾之后 + **用户显式同意** + 未解锁
+- **拆桨隔离这一条已于 2026-10-06 经用户决定放宽**（判断是风险没那么高）。仍然成立的事实：电子舱与 ESC **共用同一块电池**，所以**不能靠拔电池隔离**（拔了 BlueOS 就没了，根本刷不了）。助手建议首轮干测用小幅度短点动（±0.1、每次 1 秒）而不是 0.6：直控层没有混控兜底，单桨满推时整机会在台面上移动
 - **刷机后必须 `RESTART AUTOPILOT`**，并以 **uptime 归零**为判据
 - **不得在 vanilla 装机验证通过之前刷改过的固件**（否则起不来时分不清是环境问题还是自己的 C++）
 - 刷机前导出参数（已备份）、确认 `RESTORE DEFAULT FIRMWARE` 可用
@@ -142,28 +142,27 @@ output_to_motors()
 3. 开机 STATUSTEXT 抓不到（我们是 SITL 启动之后才连上的）→ 应降级为信息项，真正验证留到刷机后
 4. 启动瞬态（读数 1000）污染了 A 项 → 需要 settle 延时
 
-**已改但未完成**：`sitl_accept.py` 已加 `reset_ext()`、`arm_and_settle()`、自动探测真实电机通道（`MOTOR_CH`）；**测试主体序列尚未按新 helper 重写**。
+**2026-10-06 已重建验收台**（细节见 [PROGRESS.md](PROGRESS.md) 的 M4 条目）：新增 `sitl_ext.parm`（`FRAME_CONFIG=2` / `SR0_RC_CHAN=20` 等）、`sitl_run.sh`（一键起 SITL + 跑验收）、`.gitattributes`（`*.sh`/`*.parm` 强制 LF），并重写 `sitl_accept.py`（14 条计分项，前置条件改为硬 abort）。**但尚未运行 —— M4 要等这一跑全绿才算过。**
+
+> 同时修掉了一个会让重跑必然再失败的点：原 `reset_ext()` 直接 `MOT_EXT_ENABLE 0→1`，而固件里清 `_ext_have_cmd` 的 `clear_external_thrust()` **只在看门狗真正触发时**才被调用，于是重新使能那一瞬 `external_thrust_timed_out()` 立刻为真、当场重新锁存。正确顺序是**先让看门狗在 ENABLE 还开着时打一次**，再 `0→1`。
 
 **SITL 运行方法（已验证可用）**：
 
 ```bash
-# SITL 与测试脚本必须在同一个 WSL 会话里（否则会话结束会杀掉 SITL）；python 要加 -u 不缓冲
-mkdir -p /tmp/sitlrun && cd /tmp/sitlrun
-setsid ~/rov-dev/ardupilot-external/build/sitl/bin/ardusub -S -I0 --model vectored_6dof \
-    --defaults ~/rov-dev/ardupilot-external/Tools/autotest/default_params/sub.parm \
-    > sitl.log 2>&1 < /dev/null &
-timeout 200 python3 -u /mnt/c/bluerov2_mpc/direct_thruster/sitl_accept.py > accept.log 2>&1
+# 一条命令搞定（WSL 内）。SITL 与测试脚本必须在同一个 shell 会话里，会话一结束
+# SITL 就会被杀 —— sitl_run.sh 已把这件事连同 FRAME_CONFIG=2、擦 eeprom 一起封好。
+bash /mnt/c/bluerov2_mpc/direct_thruster/sitl_run.sh
 ```
 
 ### 下一步具体任务
 
-1. **改完 `sitl_accept.py`**：用 `FRAME_CONFIG=2` 起 SITL（追加一个 defaults 文件）、每项测试前 `reset_ext()`、加 settle 延时、把开机标记降为信息项；然后重跑四项验收：
+1. **跑 `bash direct_thruster/sitl_run.sh`**（验收台已重建完，就差这一跑）。四项验收：
    - **A** 未解锁时发非零命令 → 8 路恒 1500
    - **B** 只给 Motor3 → 只有 SERVO3 离开中位，其余恒 1500
    - **C** 停发命令（心跳仍在）→ 归中 + disarm + 锁存 + 告警 STATUSTEXT
    - **D** 非法/越权拒收：错误 group / NaN / 超范围 / 锁存期间合法命令也拒绝 / 清 `MOT_EXT_ENABLE` 后恢复可控
 2. SITL 全绿 → 提交并记录进 **`direct_thruster/PROGRESS.md`**（本线的进度写这里；仓库根的 `PROGRESS.md` 归 waypoint 线独占，别往那里追加）
-3. 之后才谈：刷改版固件（**需用户同意 + 拆桨**）→ 断桨干测（用 `servo_monitor` 验 8 路独立）→ 写上位机 `external_thruster.py`（发 `SET_ACTUATOR_CONTROL_TARGET`，复用 `pseudo_stick` 的看门狗/退出归中+自动上锁范式）→ 水下
+3. 之后才谈：刷改版固件（**需用户显式同意**）→ 干测（用 `servo_monitor` 验 8 路独立）→ 写上位机 `external_thruster.py`（发 `SET_ACTUATOR_CONTROL_TARGET`，复用 `pseudo_stick` 的看门狗/退出归中+自动上锁范式）→ 水下
 
 ---
 

@@ -1,0 +1,27 @@
+# direct_thruster M4 - extra SITL defaults for the external-8ch acceptance run.
+# Pass AFTER Tools/autotest/default_params/sub.parm so these win, and with -w.
+# NOTE: AP_Param's defaults parser uses a 100-byte line buffer -> keep every
+# line short ASCII. Longer lines get split by fgets and the tail is parsed as
+# a bogus parameter name. Rationale lives in sitl_run.sh / PROGRESS.md.
+#
+# FRAME_CONFIG 2 = Vectored_6DOF (Heavy, 8 thrusters), same as the real ROV.
+# SITL defaults to the 6-thruster frame, where Motor7/8 are never enabled and
+# SERVO7/8 read 0 - that broke every "all neutral" assertion on the first run.
+FRAME_CONFIG     2
+
+# external direct control: off by default, sitl_accept.py turns it on
+MOT_EXT_ENABLE   0
+MOT_EXT_TMOUT    500
+
+# the acceptance script arms on its own schedule
+ARMING_CHECK     0
+
+# every assertion is made from SERVO_OUTPUT_RAW samples, and the B4 sweep only
+# gets a 0.8 s window per motor -> pin the stream rate instead of hoping the
+# default is high enough. SERVO_OUTPUT_RAW rides the RC_CHANNELS stream.
+SR0_RC_CHAN      20
+SR0_EXT_STAT     5
+
+# firmware filters external commands by SYSID_MYGCS; pymavlink defaults to 255
+SYSID_MYGCS      255
+SYSID_THISMAV    1

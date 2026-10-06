@@ -57,3 +57,41 @@ WSL2 Ubuntu-22.04 + ArduSub-4.1.2 clone(与实机 hash 一致) + 手动装构建
 - 开机 STATUSTEXT `"EXT-THRUSTER build..."` → 解决"版本号/hash 与官方完全一致、分不清跑的是哪份"的问题。
 
 **未做**: 尚未刷机(等时机); 验收四项(未解锁发非零/单路独立/看门狗/非法值) 待 SITL → 断桨干测 → 水下。
+
+### direct_thruster M4 — SITL 验收台重建 (2026-10-06, dev 侧, 未刷机)
+首轮 SITL 验收 0/11, 诊断结论是**测试脚本的问题, 不是固件** —— 证据是 D2 项里
+`SERVO3=[1500, 1740]`, 外部命令确实驱动了 Motor3。本次只重建验收台, **固件 C++ 一行未动**
+(fork commit 仍是 `d88e653`)。
+
+**四个根因, 逐条对应修法**:
+
+1. **`reset_ext()` 有竞态, 照原样重跑必然还是红**。固件里"解锁存"和"清残留命令"是两条独立路径:
+   `clear_external_fault()` 只在 `MOT_EXT_ENABLE==0` 时被 50Hz 检查调用,
+   `clear_external_thrust()` (清 `_ext_have_cmd`) 只在看门狗真正触发时调用。
+   直接 `ENABLE 0->1` 的话, `_ext_have_cmd` 仍是 true 且 `_ext_last_ms` 早已过期,
+   重新使能那一瞬 `external_thrust_timed_out()` 立即为真 -> 20ms 内当场重新锁存。
+   修法: 先让看门狗在 ENABLE 还开着时打一次(它会清掉 `_ext_have_cmd`), 再 `ENABLE 0 -> 1`。
+2. **SITL 默认是 6 推进器 Vectored 帧**, Motor7/8 不被使能、SERVO7/8 恒 0,
+   把所有"全中位"判据整体带崩(这就是 0/11 的直接原因)。修法: `FRAME_CONFIG=2` 起 SITL。
+3. **被拒收的测试项会落回原混控**, 而 SITL 里没人喂 RC, `norm_input()` 钳到 -1 会把桨推离中位,
+   让"全 1500"因与本功能无关的原因报红。修法: 全程 10Hz 发中位 `MANUAL_CONTROL(z=500)` 把混控钉住,
+   并加一条基线前置检查(关掉外部控制 + 解锁 + 中位手柄 -> 必须全 1500), 不过就 abort。
+4. **窗口串扰与启动瞬态**。换命令瞬间, 上一窗口残留在接收队列的报文会算到新窗口头上;
+   启动瞬态读数 1000 会污染 A 项。修法: `run()` 加 `settle` 段(照常发命令但丢弃采样) + 开场 3s settle。
+
+**新增/重写的文件**:
+
+| 文件 | 作用 |
+|---|---|
+| `sitl_ext.parm` | SITL 追加默认参数: `FRAME_CONFIG=2` / `MOT_EXT_*` / `SR0_RC_CHAN=20`。全 ASCII 且每行 <80 字节 —— `AP_Param` 的 defaults 解析器用 `char line[100]` 固定缓冲, 中文注释会被 `fgets` 截断, 后半截当成参数名解析导致整个 defaults 加载失败 |
+| `sitl_run.sh` | 一键: 杀残留 -> 擦 eeprom -> `-w` 起 SITL(带两个 defaults) -> 等端口 -> 跑验收 -> 收尾。`-w` 必须排在 `--defaults` 前面(SITL 按 argv 顺序处理选项, `-w` 当场 `erase_all()`)。等端口用 grep 日志而非 TCP 探测, 因为 5760 一次只收一个客户端, 探测连接会和验收脚本抢名额 |
+| `sitl_accept.py` | 重写测试主体。前置条件改为**硬 abort**(改版参数在位 / `FRAME_CONFIG==2` / 电机通道=={1..8} / 基线全中位) —— 首轮的教训是前提错了还照常跑完, 会产出一堆看不懂的 FAIL |
+| `.gitattributes` | `*.sh` `*.parm` 强制 LF。本仓库 `core.autocrlf=true`, CRLF 会让 WSL 的 bash 报 `bad interpreter`。作用域只限 `direct_thruster/` |
+
+**计分项从 11 条改为 14 条**, 其中新增的是直接对应"八路单独控制"这个目标的:
+`B3` 负向命令(验 `_motor_reverse` 与符号)、`B4` 八路逐一扫描(每路单独给 0.5, 验其余七路恒中位)、
+`B2` 推力标度(`SERVO3 ~= 1740 = 1500 + 0.6*400`)、`D4` 错误 `target_system` 拒收。
+
+**状态: 验收台重建完成, 但尚未运行。** 四项验收的实际结果待下一步
+`bash direct_thruster/sitl_run.sh` 产出; 在那之前 M4 不能算通过。
+刷机仍受"用户显式同意 + 排在 waypoint 收尾之后"门控(拆桨隔离这一条用户已于 2026-10-06 放宽)。
