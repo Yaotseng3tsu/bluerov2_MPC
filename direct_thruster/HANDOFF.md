@@ -127,6 +127,16 @@ output_to_motors()
 - WSL 源码可从 Windows 侧直接读写：`\\wsl$\Ubuntu-22.04\home\yaots\rov-dev\ardupilot-external\...`
 - **别在 `/mnt/c` 下编译**（9p 文件系统极慢）
 - git commit：`git -c user.name="Yaotseng3tsu" -c user.email="zeng@robot.t.u-tokyo.ac.jp"`，消息尾注 `Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>`
+- **两条线各占一个 git worktree（2026-10-07 起）**：`C:luerov2_mpc` 归 waypoint，
+  **`C:luerov2_mpc_dt` 归 direct_thruster**（本线的一切都在这里做）。共用同一个 `.git`，
+  所以分支 / 远端 / 历史是同一套；一个分支同一时间只能被一个 worktree 检出。
+  > 原本定的是"单工作目录、main 上串行、不开 worktree"，理由是瓶颈不是 git 而是用户本人。
+  > 2026-10-07 推翻：用户为两条线各开了一个会话，当天踩了两次 —— ① 另一个会话在共用目录里
+  > 切了分支，本线的提交落到了 waypoint 的分支上；② 目录切回 waypoint 分支后，
+  > `direct_thruster/` 下的新文件在工作树里**不存在**，跑脚本直接 `No such file`。
+  > 两条线的文件物理上无法同时在场，这不是意外而是单工作目录的必然结果。
+- **每次 commit / push 前先 `git branch --show-current` 核对**。不对就停下来问，
+  **不要自作主张切分支** —— 切分支会改掉另一个会话正在读的文件内容。
 
 ---
 
