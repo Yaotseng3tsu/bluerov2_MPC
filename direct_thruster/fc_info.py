@@ -28,6 +28,15 @@ for i in range(1, 9):
     for suf in ("FUNCTION", "REVERSED", "MIN", "MAX", "TRIM"):
         PARAMS.append(f"SERVO{i}_{suf}")
 
+# 改版固件的标志参数。官方 ArduSub 没有它们, 读不到 = 机上不是我们这份 fork。
+# 版本号和 git hash 与官方完全一致(同一个 tag), 所以这是唯一能一眼分辨的客观判据。
+PARAMS += ["MOT_EXT_ENABLE", "MOT_EXT_TMOUT"]
+
+# 每个电机的方向参数。直控绕过混控, 但 output_external_thrusters() 仍然会乘
+# _motor_reverse[i], 所以这几个值直接影响"正命令往哪个方向推"。符号标定要用。
+for i in range(1, 9):
+    PARAMS.append(f"MOT_{i}_DIRECTION")
+
 # ArduSub SERVOn_FUNCTION: 33..40 = Motor1..8 (BLHeli/常规电机功能号)
 SERVO_FUNC = {0: "Disabled", 1: "RCPassThru", 33: "Motor1", 34: "Motor2",
               35: "Motor3", 36: "Motor4", 37: "Motor5", 38: "Motor6",
@@ -124,6 +133,24 @@ def main() -> int:
               f"{str(int(mn)) if mn is not None else '?':>6} "
               f"{str(int(mx)) if mx is not None else '?':>6} "
               f"{str(int(tr)) if tr is not None else '?':>6}")
+    print("  ---- MOT_n_DIRECTION (直控时仍然生效) ----")
+    dirs = [vals.get(f"MOT_{i}_DIRECTION") for i in range(1, 9)]
+    print('    ' + '  '.join('M' + str(i + 1) + '=' +
+                            (str(int(d)) if d is not None else '?')
+                            for i, d in enumerate(dirs)))
+
+    print("\n=== 是不是我们这份改版固件 ===")
+    en, tm = vals.get("MOT_EXT_ENABLE"), vals.get("MOT_EXT_TMOUT")
+    if en is None or tm is None:
+        print("  [否] 读不到 MOT_EXT_ENABLE / MOT_EXT_TMOUT")
+        print("       机上不是 direct_thruster 这份 fork。external_thruster.py 的私有")
+        print("       约定(group_mlx=1 等)多半不适用, 需要先按机上固件的接口改。")
+        print("       注意固件对不认识的帧是直接丢弃的, 症状是: 连上了但不动。")
+    else:
+        print(f"  [是] MOT_EXT_ENABLE={en:.0f}  MOT_EXT_TMOUT={tm:.0f}ms")
+        if en != 0:
+            print("       注意: MOT_EXT_ENABLE 不是 0, 外部直控当前是开着的。")
+
     print("\n[fc_info] 完成 (只读, 未改动任何参数)。完整参数请在 BlueOS Autopilot Parameters 导出备份。")
     return 0
 
