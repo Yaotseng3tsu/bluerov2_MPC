@@ -496,8 +496,15 @@ def _hold(ext: ExternalThruster, seconds: float, label: str) -> None:
     进来先把缓存的读数丢掉: 命令刚换时还没收到新的 SERVO_OUTPUT_RAW(流只有 10Hz),
     直接打印会显示上一段的值 —— 比如归零那一行显示上一路的 1620, 看起来像归零没生效。
     """
-    ext.servo = None
     t_end = mono() + seconds
+    # 丢掉"命令生效之前就已经在队列里"的旧报文。只把 servo 置 None 不够 ——
+    # 队列里那几帧 pump 出来照样会填回去, 于是每段第一行显示的是**上一段**的值。
+    # t_end 在 flush 之前就算好, 所以这 0.2s 不会缩短本段时长(推力已经发出去了)。
+    t_flush = mono() + 0.2
+    while mono() < t_flush:
+        ext.pump()
+        time.sleep(0.01)
+    ext.servo = None
     next_print = 0.0
     while mono() < t_end:
         ext.pump()
