@@ -33,7 +33,11 @@ while [ $# -gt 0 ]; do
 done
 
 SRC="${SRC:-$HOME/rov-dev/ardupilot-external}"
-REPO="${REPO:-/mnt/c/bluerov2_mpc}"
+# 仓库根从**本脚本自己的位置**推出来, 不写死路径 ——
+# 两条线各占一个 git worktree (waypoint 在 C:/bluerov2_mpc, direct_thruster 在
+# C:/bluerov2_mpc_dt), 写死就会跑到另一条线的工作树上去。
+_SELF_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO="${REPO:-$(dirname "$_SELF_DIR")}"
 RUNDIR="${RUNDIR:-/tmp/sitlrun}"
 
 BIN="$SRC/build/sitl/bin/ardusub"
